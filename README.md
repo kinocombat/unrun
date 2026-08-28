@@ -90,9 +90,17 @@ FrameDelta { content_id }
 
 ## 検証
 
+format、全 unit test、Clippy、実 framebuffer の orientation test をまとめて実行できます。最後の test では数 frame だけ検証用ウィンドウが開きます。
+
 ```sh
-cargo test --all-targets
-cargo clippy --all-targets -- -D warnings
+./scripts/check.sh
+```
+
+個別に実行する場合は次のコマンドを使います。
+
+```sh
+cargo test --locked --all-targets
+cargo clippy --locked --all-targets -- -D warnings
 ```
 
 テストには次を含みます。
@@ -109,3 +117,11 @@ cargo clippy --all-targets -- -D warnings
 ```sh
 UNRUN_CAPTURE_PATH=/tmp/unrun.png cargo run
 ```
+
+画面の上下・左右反転を実 framebuffer の四隅で検査する integration test も実行できます。
+
+```sh
+cargo run --locked -- --visual-test
+```
+
+orientation test は左上=赤、右上=緑、左下=青、右下=黄の probe を GPU で描き、screen readback の pixel を直接照合します。validator 自体にも正常・上下反転・左右反転の unit test があります。GitHub Actions では macOS / Windows の通常 test に加え、Linux の仮想 display 上でこの GPU test を実行します。

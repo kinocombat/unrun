@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 
 use macroquad::prelude::*;
 use unrun::timeline::{Timeline, TimelineStats};
+use unrun::visual_test::{draw_orientation_probe, validate_orientation};
 use unrun::world::{
     BEACON, DOOR_X, FIRST_BLOCK, FIXED_DT, FLOOR, FixedPointState, GOAL, GameState, HISTORY_FRAMES,
     InputFrame, LAST_BLOCK, PLAYER_WIDTH, WORLD_HEIGHT, WORLD_WIDTH, static_solids,
@@ -152,19 +153,36 @@ async fn main() {
     let mut game = Game::new();
     // Enables deterministic visual smoke tests without changing normal play.
     let capture_path = std::env::var("UNRUN_CAPTURE_PATH").ok();
+    let visual_test = std::env::args().any(|argument| argument == "--visual-test");
     let mut rendered_frames = 0;
     loop {
-        game.update(get_frame_time());
-
         clear_background(color(3, 4, 12, 255));
         let world_camera = responsive_world_camera();
         set_camera(&world_camera);
-        render_world(&game);
+        if visual_test {
+            draw_orientation_probe(WORLD_WIDTH, WORLD_HEIGHT);
+        } else {
+            game.update(get_frame_time());
+            render_world(&game);
+        }
         set_default_camera();
         rendered_frames += 1;
         if rendered_frames == 3 {
-            if let Some(path) = &capture_path {
-                export_screen_png(path);
+            if visual_test {
+                let image = get_screen_data();
+                if let Some(path) = &capture_path {
+                    image.export_png(path);
+                }
+                validate_orientation(&image)
+                    .unwrap_or_else(|error| panic!("visual orientation test failed: {error}"));
+                println!(
+                    "visual orientation test passed at {}x{}",
+                    image.width(),
+                    image.height()
+                );
+                return;
+            } else if let Some(path) = &capture_path {
+                get_screen_data().export_png(path);
                 return;
             }
         }
@@ -183,19 +201,12 @@ fn responsive_world_camera() -> Camera2D {
         let height = WORLD_WIDTH / screen_aspect;
         Rect::new(0.0, (WORLD_HEIGHT - height) * 0.5, WORLD_WIDTH, height)
     };
-    Camera2D::from_display_rect(display)
-}
-
-fn export_screen_png(path: &str) {
-    let mut image = get_screen_data();
-    let row_bytes = image.width() * 4;
-    for y in 0..image.height() / 2 {
-        let top = y * row_bytes;
-        let bottom = (image.height() - y - 1) * row_bytes;
-        let (upper, lower) = image.bytes.split_at_mut(bottom);
-        upper[top..top + row_bytes].swap_with_slice(&mut lower[..row_bytes]);
-    }
-    image.export_png(path);
+    Camera2D::from_display_rect(Rect::new(
+        display.x,
+        display.y + display.h,
+        display.w,
+        -display.h,
+    ))
 }
 
 fn render_world(game: &Game) {
