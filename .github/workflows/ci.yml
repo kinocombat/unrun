@@ -14,12 +14,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        os: [macos-latest, windows-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.85.0
         with:
           components: rustfmt, clippy
+      - name: Install Linux audio dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes libasound2-dev
       - run: cargo fmt --check
       - run: cargo test --locked --all-targets
       - run: cargo clippy --locked --all-targets -- -D warnings
@@ -30,7 +33,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.85.0
-      - name: Install virtual display
-        run: sudo apt-get update && sudo apt-get install --yes xvfb libgl1 libx11-6 libxi6
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install --yes xvfb libgl1 libx11-6 libxi6 libasound2-dev
       - name: Check framebuffer orientation
         run: xvfb-run --auto-servernum --server-args="-screen 0 1600x900x24" cargo run --locked -- --visual-test
