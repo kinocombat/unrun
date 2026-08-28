@@ -16,7 +16,7 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.85.0
         with:
           components: rustfmt, clippy
@@ -28,7 +28,7 @@ jobs:
     name: Visual orientation / Linux
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.85.0
       - name: Install virtual display
         run: sudo apt-get update && sudo apt-get install --yes xvfb libgl1 libx11-6 libxi6
