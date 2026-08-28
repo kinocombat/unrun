@@ -1,11 +1,18 @@
 use std::collections::VecDeque;
 
+use macroquad::audio::{
+    PlaySoundParams, Sound, load_sound_from_bytes, play_sound, set_sound_volume, stop_sound,
+};
 use macroquad::prelude::*;
+use unrun::sound::{
+    fixed_point_wav, gate_latched_wav, jump_wav, rewind_loop_wav, stage_clear_wav,
+    uk_garage_loop_wav,
+};
 use unrun::timeline::{Timeline, TimelineStats};
 use unrun::visual_test::{draw_orientation_probe, validate_orientation};
 use unrun::world::{
-    BEACON, DOOR_X, FIRST_BLOCK, FIXED_DT, FLOOR, FixedPointState, GOAL, GameState, HISTORY_FRAMES,
-    InputFrame, LAST_BLOCK, PLAYER_WIDTH, WORLD_HEIGHT, WORLD_WIDTH, static_solids,
+    FIXED_DT, FixedPointState, GameState, HISTORY_FRAMES, InputFrame, PLAYER_WIDTH, STAGES, Stage,
+    StepEvents, WORLD_HEIGHT, WORLD_WIDTH, stage,
 };
 
 const CHECKPOINT_INTERVAL: usize = 120;
@@ -33,6 +40,7 @@ struct Ghost {
 }
 
 struct Game {
+    stage_index: usize,
     state: GameState,
     fixed: FixedPointState,
     timeline: Timeline,
@@ -44,12 +52,31 @@ struct Game {
     ghosts: VecDeque<Ghost>,
 }
 
+#[derive(Default)]
+struct GameEvents {
+    jumped: bool,
+    fixed_point_activated: bool,
+    gate_latched: bool,
+    completed: bool,
+    stage_changed: bool,
+}
+
+impl GameEvents {
+    fn include_step(&mut self, events: StepEvents) {
+        self.jumped |= events.jumped;
+        self.fixed_point_activated |= events.fixed_point_activated;
+        self.completed |= events.completed;
+    }
+}
+
 impl Game {
-    fn new() -> Self {
-        let state = GameState::default();
+    fn new(stage_index: usize) -> Self {
+        let stage_index = stage_index % STAGES.len();
+        let state = GameState::new(stage(stage_index));
         let timeline = Timeline::new(&state, HISTORY_FRAMES, CHECKPOINT_INTERVAL)
             .expect("the initial game state must be snapshot-compatible");
         Self {
+            stage_index,
             state,
             fixed: FixedPointState::default(),
             timeline,
@@ -62,16 +89,29 @@ impl Game {
         }
     }
 
-    fn reset(&mut self) {
-        *self = Self::new();
+    fn current_stage(&self) -> &'static Stage {
+        stage(self.stage_index)
     }
 
-    fn update(&mut self, frame_dt: f32) {
-        if is_key_pressed(KeyCode::Backspace)
-            || (self.state.completed && is_key_pressed(KeyCode::Enter))
-        {
+    fn is_last_stage(&self) -> bool {
+        self.stage_index + 1 == STAGES.len()
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new(self.stage_index);
+    }
+
+    fn update(&mut self, frame_dt: f32) -> GameEvents {
+        let mut events = GameEvents::default();
+        if is_key_pressed(KeyCode::Backspace) {
             self.reset();
-            return;
+            events.stage_changed = true;
+            return events;
+        }
+        if self.state.completed && is_key_pressed(KeyCode::Enter) {
+            *self = Self::new((self.stage_index + 1) % STAGES.len());
+            events.stage_changed = true;
+            return events;
         }
 
         let frame_dt = frame_dt.min(0.1);
@@ -91,7 +131,7 @@ impl Game {
         if self.state.completed && !rewind_requested {
             self.accumulator = 0.0;
             self.rewind_active = false;
-            return;
+            return events;
         }
 
         let horizontal = axis(
@@ -102,12 +142,13 @@ impl Game {
         self.rewind_active = false;
 
         let mut steps = 0;
+        let current_stage = stage(self.stage_index);
         while self.accumulator >= FIXED_DT && steps < MAX_FRAME_STEPS {
             if rewind_requested {
                 let old_player = self.state.player;
                 match self.timeline.rewind(&mut self.state) {
                     Ok(true) => {
-                        self.fixed.step_rewind(FIXED_DT);
+                        events.gate_latched |= self.fixed.step_rewind(FIXED_DT);
                         self.rewind_active = true;
                         self.jump_queued = false;
                         self.ghost_timer += 1;
@@ -134,7 +175,10 @@ impl Game {
                     jump_pressed: self.jump_queued,
                 };
                 self.jump_queued = false;
-                self.state.step(input, &mut self.fixed, FIXED_DT);
+                let step_events = self
+                    .state
+                    .step(input, &mut self.fixed, current_stage, FIXED_DT);
+                events.include_step(step_events);
                 self.timeline
                     .record(&self.state)
                     .expect("the game must always emit valid snapshots");
@@ -145,15 +189,124 @@ impl Game {
         if steps == MAX_FRAME_STEPS {
             self.accumulator = 0.0;
         }
+        events
+    }
+}
+
+struct AudioSystem {
+    music: Sound,
+    jump: Sound,
+    fixed_point: Sound,
+    gate_latched: Sound,
+    stage_clear: Sound,
+    rewind: Sound,
+    muted: bool,
+    rewind_playing: bool,
+}
+
+impl AudioSystem {
+    async fn load() -> Result<Self, macroquad::Error> {
+        let music = load_sound_from_bytes(&uk_garage_loop_wav()).await?;
+        let jump = load_sound_from_bytes(&jump_wav()).await?;
+        let fixed_point = load_sound_from_bytes(&fixed_point_wav()).await?;
+        let gate_latched = load_sound_from_bytes(&gate_latched_wav()).await?;
+        let stage_clear = load_sound_from_bytes(&stage_clear_wav()).await?;
+        let rewind = load_sound_from_bytes(&rewind_loop_wav()).await?;
+        play_sound(
+            &music,
+            PlaySoundParams {
+                looped: true,
+                volume: 0.42,
+            },
+        );
+        Ok(Self {
+            music,
+            jump,
+            fixed_point,
+            gate_latched,
+            stage_clear,
+            rewind,
+            muted: false,
+            rewind_playing: false,
+        })
+    }
+
+    fn update(&mut self, events: &GameEvents, rewinding: bool) {
+        if is_key_pressed(KeyCode::M) {
+            self.muted = !self.muted;
+        }
+        if events.jumped {
+            self.play_once(&self.jump, 0.34);
+        }
+        if events.fixed_point_activated {
+            self.play_once(&self.fixed_point, 0.58);
+        }
+        if events.gate_latched {
+            self.play_once(&self.gate_latched, 0.62);
+        }
+        if events.completed {
+            self.play_once(&self.stage_clear, 0.66);
+        }
+
+        if rewinding != self.rewind_playing {
+            if rewinding {
+                play_sound(
+                    &self.rewind,
+                    PlaySoundParams {
+                        looped: true,
+                        volume: if self.muted { 0.0 } else { 0.28 },
+                    },
+                );
+            } else {
+                stop_sound(&self.rewind);
+            }
+            self.rewind_playing = rewinding;
+        }
+        set_sound_volume(
+            &self.music,
+            if self.muted {
+                0.0
+            } else if rewinding {
+                0.20
+            } else {
+                0.42
+            },
+        );
+        if self.rewind_playing {
+            set_sound_volume(&self.rewind, if self.muted { 0.0 } else { 0.28 });
+        }
+    }
+
+    fn play_once(&self, sound: &Sound, volume: f32) {
+        if !self.muted {
+            play_sound(
+                sound,
+                PlaySoundParams {
+                    looped: false,
+                    volume,
+                },
+            );
+        }
     }
 }
 
 #[macroquad::main(window_conf)]
 async fn main() {
-    let mut game = Game::new();
+    let visual_test = std::env::args().any(|argument| argument == "--visual-test");
+    let mut game = Game::new(0);
+    let mut audio = if visual_test {
+        None
+    } else {
+        match AudioSystem::load().await {
+            Ok(audio) => Some(audio),
+            Err(error) => {
+                eprintln!("audio disabled: {error}");
+                None
+            }
+        }
+    };
     // Enables deterministic visual smoke tests without changing normal play.
     let capture_path = std::env::var("UNRUN_CAPTURE_PATH").ok();
-    let visual_test = std::env::args().any(|argument| argument == "--visual-test");
     let mut rendered_frames = 0;
     loop {
         clear_background(color(3, 4, 12, 255));
@@ -162,8 +315,11 @@ async fn main() {
         if visual_test {
             draw_orientation_probe(WORLD_WIDTH, WORLD_HEIGHT);
         } else {
-            game.update(get_frame_time());
-            render_world(&game);
+            let events = game.update(get_frame_time());
+            if let Some(audio) = &mut audio {
+                audio.update(&events, game.rewind_active);
+            }
+            render_world(&game, audio.as_ref().is_none_or(|audio| audio.muted));
         }
         set_default_camera();
         rendered_frames += 1;
@@ -209,13 +365,14 @@ fn responsive_world_camera() -> Camera2D {
     ))
 }
 
-fn render_world(game: &Game) {
-    draw_background(game.rewind_active);
-    draw_level_geometry();
-    draw_time_cable(&game.fixed);
-    draw_beacon(&game.fixed);
-    draw_gate(&game.fixed);
-    draw_goal(game.state.completed);
+fn render_world(game: &Game, muted: bool) {
+    let current_stage = game.current_stage();
+    draw_background(current_stage, game.rewind_active);
+    draw_level_geometry(current_stage);
+    draw_time_cable(&game.fixed, current_stage);
+    draw_beacon(&game.fixed, current_stage);
+    draw_gate(&game.fixed, current_stage);
+    draw_goal(current_stage, game.state.completed);
 
     for ghost in &game.ghosts {
         draw_player_at(
@@ -232,14 +389,14 @@ fn render_world(game: &Game) {
         draw_rewind_overlay();
     }
     draw_hud(game);
-    draw_world_labels(&game.fixed);
+    draw_world_labels(game, muted);
 
     if game.state.completed {
         draw_completion(game);
     }
 }
 
-fn draw_background(rewinding: bool) {
+fn draw_background(stage: &Stage, rewinding: bool) {
     for band in 0..9 {
         let t = band as f32 / 8.0;
         draw_rectangle(
@@ -267,7 +424,14 @@ fn draw_background(rewinding: bool) {
     }
 
     for x in (0..=1280).step_by(64) {
-        draw_line(x as f32, 0.0, x as f32, FLOOR.y, 1.0, color(37, 55, 91, 35));
+        draw_line(
+            x as f32,
+            0.0,
+            x as f32,
+            stage.base_floor_y,
+            1.0,
+            color(37, 55, 91, 35),
+        );
     }
     for y in (44..=620).step_by(64) {
         draw_line(
@@ -281,27 +445,28 @@ fn draw_background(rewinding: bool) {
     }
 
     let halo = 0.5 + 0.5 * (get_time() as f32 * 0.7).sin();
+    let halo_y = stage.door_floor_y - 305.0;
     for ring in 0..6 {
         draw_circle_lines(
-            DOOR_X + 21.0,
-            315.0,
+            stage.door_x + 21.0,
+            halo_y,
             85.0 + ring as f32 * 28.0,
             1.0,
             Color::new(0.23, 0.15, 0.42, 0.16 + halo * 0.025),
         );
     }
     draw_line(
-        DOOR_X + 21.0,
-        72.0,
-        DOOR_X + 21.0,
-        520.0,
+        stage.door_x + 21.0,
+        (stage.door_floor_y - 548.0).max(18.0),
+        stage.door_x + 21.0,
+        stage.door_floor_y - 100.0,
         1.0,
         color(131, 89, 204, 35),
     );
 }
 
-fn draw_level_geometry() {
-    for solid in static_solids() {
+fn draw_level_geometry(stage: &Stage) {
+    for &solid in stage.solids {
         draw_rectangle(solid.x, solid.y, solid.w, solid.h, color(17, 24, 43, 255));
         draw_rectangle(solid.x, solid.y, solid.w, 5.0, color(61, 88, 120, 255));
         draw_line(
@@ -326,46 +491,56 @@ fn draw_level_geometry() {
         }
     }
 
-    draw_rectangle(0.0, FLOOR.y + 62.0, WORLD_WIDTH, 38.0, color(6, 8, 17, 255));
+    draw_rectangle(
+        0.0,
+        stage.base_floor_y + 62.0,
+        WORLD_WIDTH,
+        38.0,
+        color(6, 8, 17, 255),
+    );
     for x in (18..1280).step_by(72) {
-        draw_rectangle(x as f32, FLOOR.y + 19.0, 2.0, 17.0, color(65, 83, 106, 100));
+        draw_rectangle(
+            x as f32,
+            stage.base_floor_y + 19.0,
+            2.0,
+            17.0,
+            color(65, 83, 106, 100),
+        );
     }
 
-    draw_rectangle_lines(
-        FIRST_BLOCK.x + 12.0,
-        FIRST_BLOCK.y + 16.0,
-        FIRST_BLOCK.w - 24.0,
-        28.0,
-        2.0,
-        color(71, 106, 137, 120),
-    );
-    draw_rectangle_lines(
-        LAST_BLOCK.x + 12.0,
-        LAST_BLOCK.y + 14.0,
-        LAST_BLOCK.w - 24.0,
-        22.0,
-        2.0,
-        color(71, 106, 137, 120),
-    );
+    for &solid in stage.solids.iter().skip(1) {
+        if solid.w > 36.0 && solid.h > 28.0 {
+            draw_rectangle_lines(
+                solid.x + 12.0,
+                solid.y + 12.0,
+                solid.w - 24.0,
+                (solid.h - 24.0).max(8.0),
+                2.0,
+                color(71, 106, 137, 120),
+            );
+        }
+    }
 }
 
-fn draw_time_cable(fixed: &FixedPointState) {
+fn draw_time_cable(fixed: &FixedPointState, stage: &Stage) {
     let cable_color = if fixed.door_armed {
         color(248, 194, 74, 210)
     } else {
         color(90, 78, 79, 110)
     };
-    let y = FLOOR.y - 8.0;
-    draw_line(BEACON.x + BEACON.w, y, DOOR_X, y, 3.0, cable_color);
-    for x in (570..790).step_by(28) {
-        let radius = if fixed.door_armed { 3.0 } else { 2.0 };
-        draw_circle(x as f32, y, radius, cable_color);
-    }
+    let start = vec2(
+        stage.beacon.x + stage.beacon.w * 0.5,
+        stage.beacon.y + stage.beacon.h - 8.0,
+    );
+    let end = vec2(stage.door_x + 21.0, stage.door_floor_y - 8.0);
+    draw_line(start.x, start.y, end.x, start.y, 3.0, cable_color);
+    draw_line(end.x, start.y, end.x, end.y, 3.0, cable_color);
 }
 
-fn draw_beacon(fixed: &FixedPointState) {
+fn draw_beacon(fixed: &FixedPointState, stage: &Stage) {
+    let beacon = stage.beacon;
     let pulse = 0.5 + 0.5 * (get_time() as f32 * 3.2).sin();
-    let center = vec2(BEACON.x + BEACON.w * 0.5, BEACON.y + 22.0);
+    let center = vec2(beacon.x + beacon.w * 0.5, beacon.y + 22.0);
     let glow = if fixed.door_armed {
         color(255, 203, 80, (45.0 + pulse * 40.0) as u8)
     } else {
@@ -373,9 +548,9 @@ fn draw_beacon(fixed: &FixedPointState) {
     };
     draw_circle(center.x, center.y, 32.0 + pulse * 5.0, glow);
     draw_rectangle(
-        BEACON.x + 7.0,
-        FLOOR.y - 12.0,
-        BEACON.w - 14.0,
+        beacon.x + 7.0,
+        beacon.y + beacon.h - 12.0,
+        beacon.w - 14.0,
         12.0,
         color(52, 48, 48, 255),
     );
@@ -403,8 +578,9 @@ fn draw_beacon(fixed: &FixedPointState) {
     draw_circle(center.x, center.y, 4.0, color(255, 245, 205, 255));
 }
 
-fn draw_gate(fixed: &FixedPointState) {
-    let rect = fixed.door_rect();
+fn draw_gate(fixed: &FixedPointState, stage: &Stage) {
+    let door_x = stage.door_x;
+    let rect = fixed.door_rect(stage);
     let active = fixed.door_armed;
     let gate_color = if fixed.door_latched {
         color(245, 195, 72, 255)
@@ -414,13 +590,21 @@ fn draw_gate(fixed: &FixedPointState) {
         color(107, 53, 99, 255)
     };
 
-    draw_rectangle(DOOR_X - 10.0, 82.0, 62.0, 8.0, color(38, 29, 52, 255));
-    draw_line(DOOR_X, 82.0, DOOR_X, FLOOR.y, 2.0, color(119, 65, 135, 100));
+    let rail_top = (stage.door_floor_y - 538.0).max(20.0);
+    draw_rectangle(door_x - 10.0, rail_top, 62.0, 8.0, color(38, 29, 52, 255));
     draw_line(
-        DOOR_X + 42.0,
-        82.0,
-        DOOR_X + 42.0,
-        FLOOR.y,
+        door_x,
+        rail_top,
+        door_x,
+        stage.door_floor_y,
+        2.0,
+        color(119, 65, 135, 100),
+    );
+    draw_line(
+        door_x + 42.0,
+        rail_top,
+        door_x + 42.0,
+        stage.door_floor_y,
         2.0,
         color(119, 65, 135, 100),
     );
@@ -445,20 +629,29 @@ fn draw_gate(fixed: &FixedPointState) {
         }
     }
 
-    draw_rectangle(DOOR_X - 18.0, 188.0, 5.0, 244.0, color(25, 27, 43, 220));
+    let gauge_top = (stage.door_floor_y - 432.0).max(90.0);
+    let gauge_bottom = (stage.door_floor_y - 188.0).max(gauge_top + 100.0);
+    let gauge_height = gauge_bottom - gauge_top;
     draw_rectangle(
-        DOOR_X - 18.0,
-        432.0 - 244.0 * fixed.door_open,
+        door_x - 18.0,
+        gauge_top,
         5.0,
-        244.0 * fixed.door_open,
+        gauge_height,
+        color(25, 27, 43, 220),
+    );
+    draw_rectangle(
+        door_x - 18.0,
+        gauge_bottom - gauge_height * fixed.door_open,
+        5.0,
+        gauge_height * fixed.door_open,
         gate_color,
     );
     for tick in 0..=4 {
-        let y = 188.0 + tick as f32 * 61.0;
+        let y = gauge_top + tick as f32 * gauge_height / 4.0;
         draw_line(
-            DOOR_X - 23.0,
+            door_x - 23.0,
             y,
-            DOOR_X - 10.0,
+            door_x - 10.0,
             y,
             1.0,
             color(119, 89, 131, 160),
@@ -466,8 +659,9 @@ fn draw_gate(fixed: &FixedPointState) {
     }
 }
 
-fn draw_goal(completed: bool) {
-    let center = vec2(GOAL.x + GOAL.w * 0.5, GOAL.y + GOAL.h * 0.52);
+fn draw_goal(stage: &Stage, completed: bool) {
+    let goal = stage.goal;
+    let center = vec2(goal.x + goal.w * 0.5, goal.y + goal.h * 0.52);
     let pulse = 0.5 + 0.5 * (get_time() as f32 * 2.1).sin();
     let glow = if completed {
         color(255, 210, 93, 85)
@@ -478,10 +672,10 @@ fn draw_goal(completed: bool) {
     for inset in 0..3 {
         let amount = inset as f32 * 8.0;
         draw_rectangle_lines(
-            GOAL.x + amount,
-            GOAL.y + amount,
-            GOAL.w - amount * 2.0,
-            GOAL.h - amount,
+            goal.x + amount,
+            goal.y + amount,
+            goal.w - amount * 2.0,
+            goal.h - amount,
             2.0,
             if completed {
                 color(255, 213, 105, 220 - inset * 45)
@@ -567,11 +761,22 @@ fn draw_rewind_overlay() {
 
 fn draw_hud(game: &Game) {
     let stats = game.timeline.stats();
+    let stage = game.current_stage();
     let panel = color(7, 10, 23, 210);
     draw_rectangle(28.0, 22.0, 470.0, 105.0, panel);
     draw_rectangle_lines(28.0, 22.0, 470.0, 105.0, 1.0, color(75, 107, 139, 120));
 
-    small_text("TIMELINE / 20 SEC", 45.0, 50.0, color(171, 200, 214, 255));
+    small_text(
+        &format!(
+            "STAGE {}/{}  {}",
+            game.stage_index + 1,
+            STAGES.len(),
+            stage.name
+        ),
+        45.0,
+        50.0,
+        color(171, 200, 214, 255),
+    );
     let bar_x = 45.0;
     let bar_y = 66.0;
     let bar_w = 330.0;
@@ -647,19 +852,26 @@ fn draw_hud(game: &Game) {
     }
 }
 
-fn draw_world_labels(fixed: &FixedPointState) {
-    small_text("A / D", 82.0, 592.0, color(119, 149, 164, 220));
-    small_text("MOVE", 78.0, 608.0, color(63, 89, 105, 220));
+fn draw_world_labels(game: &Game, muted: bool) {
+    let stage = game.current_stage();
+    let fixed = &game.fixed;
+    small_text(
+        &format!("STAGE {}/{}", game.stage_index + 1, STAGES.len()),
+        32.0,
+        640.0,
+        color(98, 125, 144, 180),
+    );
+    small_text(stage.subtitle, 32.0, 658.0, color(120, 150, 170, 190));
     small_text(
         "SPACE",
-        FIRST_BLOCK.x + 13.0,
-        FIRST_BLOCK.y - 24.0,
+        stage.jump_hint[0],
+        stage.jump_hint[1],
         color(119, 149, 164, 220),
     );
     small_text(
         "JUMP",
-        FIRST_BLOCK.x + 18.0,
-        FIRST_BLOCK.y - 8.0,
+        stage.jump_hint[0] + 5.0,
+        stage.jump_hint[1] + 16.0,
         color(63, 89, 105, 220),
     );
     small_text(
@@ -668,8 +880,8 @@ fn draw_world_labels(fixed: &FixedPointState) {
         } else {
             "FIXED POINT"
         },
-        BEACON.x - 28.0,
-        BEACON.y - 18.0,
+        stage.beacon.x - 28.0,
+        stage.beacon.y - 18.0,
         if fixed.door_armed {
             color(251, 205, 100, 245)
         } else {
@@ -677,49 +889,79 @@ fn draw_world_labels(fixed: &FixedPointState) {
         },
     );
     if fixed.door_armed && !fixed.door_latched {
-        centered_text(
-            "HOLD  R",
-            DOOR_X + 21.0,
-            470.0,
-            25,
-            color(226, 91, 178, 240),
-        );
+        let door_center = stage.door_x + 21.0;
+        let hint_y = (stage.door_floor_y - 150.0).clamp(120.0, 520.0);
+        centered_text("HOLD  R", door_center, hint_y, 25, color(226, 91, 178, 240));
         centered_text(
             "THIS GATE RUNS BACKWARD",
-            DOOR_X + 21.0,
-            495.0,
+            door_center,
+            hint_y + 25.0,
             15,
             color(141, 89, 139, 230),
         );
     }
     small_text(
         "EXIT",
-        GOAL.x + 18.0,
-        GOAL.y - 12.0,
+        stage.goal.x + 18.0,
+        stage.goal.y - 12.0,
         color(97, 211, 214, 230),
     );
-    small_text("BACKSPACE / RESET", 1090.0, 697.0, color(61, 79, 97, 180));
+    small_text("BACKSPACE / RESET", 1090.0, 682.0, color(61, 79, 97, 180));
+    small_text(
+        if muted { "M / UNMUTE" } else { "M / MUTE" },
+        1090.0,
+        697.0,
+        color(61, 79, 97, 180),
+    );
 }
 
 fn draw_completion(game: &Game) {
     draw_rectangle(0.0, 0.0, WORLD_WIDTH, WORLD_HEIGHT, color(5, 7, 17, 175));
     let x = 342.0;
     let y = 202.0;
-    draw_rectangle(x, y, 596.0, 276.0, color(9, 13, 28, 245));
-    draw_rectangle_lines(x, y, 596.0, 276.0, 2.0, color(247, 199, 88, 220));
+    draw_rectangle(x, y, 596.0, 292.0, color(9, 13, 28, 245));
+    draw_rectangle_lines(x, y, 596.0, 292.0, 2.0, color(247, 199, 88, 220));
     draw_rectangle(x, y, 596.0, 7.0, color(247, 199, 88, 255));
+    let stage = game.current_stage();
+    let title = if game.is_last_stage() {
+        "PARADOX RESOLVED"
+    } else {
+        "STAGE CLEARED"
+    };
+    let subtitle = if game.is_last_stage() {
+        "THE GATE REMEMBERED A FUTURE YOU ERASED."
+    } else {
+        "THE NEXT TIMELINE IS ALREADY OPEN."
+    };
+    let action = if game.is_last_stage() {
+        "ENTER / REPLAY STAGE 01     R / REWIND THE ENDING"
+    } else {
+        "ENTER / NEXT STAGE     R / REWIND THIS ENDING"
+    };
     centered_text(
-        "PARADOX RESOLVED",
+        title,
         WORLD_WIDTH * 0.5,
         y + 75.0,
         38,
         color(246, 211, 125, 255),
     );
     centered_text(
-        "THE GATE REMEMBERED A FUTURE YOU ERASED.",
+        &format!(
+            "{}  /  {}/{}",
+            stage.name,
+            game.stage_index + 1,
+            STAGES.len()
+        ),
         WORLD_WIDTH * 0.5,
-        y + 119.0,
-        20,
+        y + 105.0,
+        15,
+        color(148, 175, 190, 255),
+    );
+    centered_text(
+        subtitle,
+        WORLD_WIDTH * 0.5,
+        y + 134.0,
+        18,
         color(151, 181, 192, 255),
     );
     let stats: TimelineStats = game.timeline.stats();
@@ -730,14 +972,14 @@ fn draw_completion(game: &Game) {
             stats.blob_count
         ),
         WORLD_WIDTH * 0.5,
-        y + 164.0,
+        y + 176.0,
         18,
         color(92, 220, 222, 255),
     );
     centered_text(
-        "ENTER / PLAY AGAIN     R / REWIND THE ENDING",
+        action,
         WORLD_WIDTH * 0.5,
-        y + 226.0,
+        y + 238.0,
         18,
         color(213, 224, 219, 230),
     );

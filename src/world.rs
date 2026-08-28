@@ -7,40 +7,8 @@ pub const WORLD_HEIGHT: f32 = 720.0;
 pub const FIXED_DT: f32 = 1.0 / 60.0;
 pub const HISTORY_SECONDS: usize = 20;
 pub const HISTORY_FRAMES: usize = HISTORY_SECONDS * 60;
-
 pub const PLAYER_WIDTH: f32 = 30.0;
 pub const PLAYER_HEIGHT: f32 = 48.0;
-pub const FLOOR: Rect = Rect {
-    x: 0.0,
-    y: 620.0,
-    w: WORLD_WIDTH,
-    h: 100.0,
-};
-pub const FIRST_BLOCK: Rect = Rect {
-    x: 300.0,
-    y: 550.0,
-    w: 84.0,
-    h: 70.0,
-};
-pub const LAST_BLOCK: Rect = Rect {
-    x: 970.0,
-    y: 566.0,
-    w: 92.0,
-    h: 54.0,
-};
-pub const BEACON: Rect = Rect {
-    x: 500.0,
-    y: 548.0,
-    w: 54.0,
-    h: 72.0,
-};
-pub const GOAL: Rect = Rect {
-    x: 1134.0,
-    y: 496.0,
-    w: 72.0,
-    h: 124.0,
-};
-pub const DOOR_X: f32 = 790.0;
 
 const MOVE_ACCELERATION: f32 = 1800.0;
 const GROUND_FRICTION: f32 = 2200.0;
@@ -53,10 +21,183 @@ const JUMP_BUFFER_TIME: f32 = 0.12;
 const DOOR_REWIND_SECONDS: f32 = 1.25;
 const DOOR_FORWARD_DECAY: f32 = 0.36;
 
+const STAGE_ONE_SOLIDS: [Rect; 3] = [
+    Rect {
+        x: 0.0,
+        y: 620.0,
+        w: WORLD_WIDTH,
+        h: 100.0,
+    },
+    Rect {
+        x: 300.0,
+        y: 550.0,
+        w: 84.0,
+        h: 70.0,
+    },
+    Rect {
+        x: 970.0,
+        y: 566.0,
+        w: 92.0,
+        h: 54.0,
+    },
+];
+
+const STAGE_TWO_SOLIDS: [Rect; 4] = [
+    Rect {
+        x: 0.0,
+        y: 650.0,
+        w: WORLD_WIDTH,
+        h: 70.0,
+    },
+    Rect {
+        x: 0.0,
+        y: 420.0,
+        w: 360.0,
+        h: 30.0,
+    },
+    Rect {
+        x: 510.0,
+        y: 420.0,
+        w: 770.0,
+        h: 30.0,
+    },
+    Rect {
+        x: 950.0,
+        y: 370.0,
+        w: 82.0,
+        h: 50.0,
+    },
+];
+
+const STAGE_THREE_SOLIDS: [Rect; 3] = [
+    Rect {
+        x: 0.0,
+        y: 620.0,
+        w: WORLD_WIDTH,
+        h: 100.0,
+    },
+    Rect {
+        x: 760.0,
+        y: 530.0,
+        w: 86.0,
+        h: 90.0,
+    },
+    Rect {
+        x: 210.0,
+        y: 550.0,
+        w: 84.0,
+        h: 70.0,
+    },
+];
+
+#[derive(Clone, Copy, Debug)]
+pub struct Stage {
+    pub name: &'static str,
+    pub subtitle: &'static str,
+    pub spawn: [f32; 2],
+    pub spawn_facing: f32,
+    pub solids: &'static [Rect],
+    pub base_floor_y: f32,
+    pub beacon: Rect,
+    pub goal: Rect,
+    pub door_x: f32,
+    pub door_floor_y: f32,
+    pub jump_hint: [f32; 2],
+}
+
+impl Stage {
+    pub fn spawn_position(self) -> Vec2 {
+        vec2(self.spawn[0], self.spawn[1])
+    }
+}
+
+pub const STAGES: [Stage; 3] = [
+    Stage {
+        name: "FIRST CONTACT",
+        subtitle: "TEACH THE GATE TO REMEMBER",
+        spawn: [82.0, 572.0],
+        spawn_facing: 1.0,
+        solids: &STAGE_ONE_SOLIDS,
+        base_floor_y: 620.0,
+        beacon: Rect {
+            x: 500.0,
+            y: 548.0,
+            w: 54.0,
+            h: 72.0,
+        },
+        goal: Rect {
+            x: 1134.0,
+            y: 496.0,
+            w: 72.0,
+            h: 124.0,
+        },
+        door_x: 790.0,
+        door_floor_y: 620.0,
+        jump_hint: [300.0, 526.0],
+    },
+    Stage {
+        name: "THE DROP",
+        subtitle: "FALL FOR THE SIGNAL / ERASE THE FALL",
+        spawn: [82.0, 372.0],
+        spawn_facing: 1.0,
+        solids: &STAGE_TWO_SOLIDS,
+        base_floor_y: 650.0,
+        beacon: Rect {
+            x: 1050.0,
+            y: 578.0,
+            w: 54.0,
+            h: 72.0,
+        },
+        goal: Rect {
+            x: 1144.0,
+            y: 296.0,
+            w: 72.0,
+            h: 124.0,
+        },
+        door_x: 740.0,
+        door_floor_y: 420.0,
+        jump_hint: [315.0, 388.0],
+    },
+    Stage {
+        name: "B-SIDE",
+        subtitle: "THE SIGNAL AND EXIT FACE OPPOSITE WAYS",
+        spawn: [590.0, 572.0],
+        spawn_facing: 1.0,
+        solids: &STAGE_THREE_SOLIDS,
+        base_floor_y: 620.0,
+        beacon: Rect {
+            x: 1120.0,
+            y: 548.0,
+            w: 54.0,
+            h: 72.0,
+        },
+        goal: Rect {
+            x: 52.0,
+            y: 496.0,
+            w: 72.0,
+            h: 124.0,
+        },
+        door_x: 390.0,
+        door_floor_y: 620.0,
+        jump_hint: [760.0, 506.0],
+    },
+];
+
+pub fn stage(index: usize) -> &'static Stage {
+    &STAGES[index % STAGES.len()]
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct InputFrame {
     pub horizontal: f32,
     pub jump_pressed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StepEvents {
+    pub jumped: bool,
+    pub fixed_point_activated: bool,
+    pub completed: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -87,14 +228,14 @@ pub struct GameState {
     pub completed: bool,
 }
 
-impl Default for GameState {
-    fn default() -> Self {
+impl GameState {
+    pub fn new(stage: &Stage) -> Self {
         Self {
             player: Player {
-                position: vec2(82.0, FLOOR.y - PLAYER_HEIGHT),
+                position: stage.spawn_position(),
                 velocity: Vec2::ZERO,
                 grounded: true,
-                facing: 1.0,
+                facing: stage.spawn_facing,
                 animation_phase: 0.0,
                 coyote_timer: COYOTE_TIME,
                 jump_buffer: 0.0,
@@ -104,10 +245,13 @@ impl Default for GameState {
     }
 }
 
+impl Default for GameState {
+    fn default() -> Self {
+        Self::new(stage(0))
+    }
+}
+
 /// State deliberately omitted from timeline snapshots.
-///
-/// The gate remembers events that happened in erased futures. This exception
-/// to rewind is both a game rule and the stage's central puzzle mechanic.
 #[derive(Clone, Debug, Default)]
 pub struct FixedPointState {
     pub door_armed: bool,
@@ -117,8 +261,10 @@ pub struct FixedPointState {
 }
 
 impl FixedPointState {
-    pub fn arm(&mut self) {
+    pub fn arm(&mut self) -> bool {
+        let activated = !self.door_armed;
         self.door_armed = true;
+        activated
     }
 
     pub fn step_forward(&mut self, dt: f32) {
@@ -127,29 +273,38 @@ impl FixedPointState {
         }
     }
 
-    pub fn step_rewind(&mut self, dt: f32) {
+    pub fn step_rewind(&mut self, dt: f32) -> bool {
         self.rewound_frames += 1;
         if !self.door_armed || self.door_latched {
-            return;
+            return false;
         }
         self.door_open = (self.door_open + dt / DOOR_REWIND_SECONDS).min(1.0);
         if self.door_open >= 1.0 {
             self.door_latched = true;
+            return true;
         }
+        false
     }
 
-    pub fn door_rect(&self) -> Rect {
+    pub fn door_rect(&self, stage: &Stage) -> Rect {
         let height = 380.0;
-        let closed_top = FLOOR.y - height;
+        let closed_top = stage.door_floor_y - height;
         let travel = 390.0 * self.door_open;
-        Rect::new(DOOR_X, closed_top - travel, 42.0, height)
+        Rect::new(stage.door_x, closed_top - travel, 42.0, height)
     }
 }
 
 impl GameState {
-    pub fn step(&mut self, input: InputFrame, fixed: &mut FixedPointState, dt: f32) {
+    pub fn step(
+        &mut self,
+        input: InputFrame,
+        fixed: &mut FixedPointState,
+        stage: &Stage,
+        dt: f32,
+    ) -> StepEvents {
+        let mut events = StepEvents::default();
         if self.completed {
-            return;
+            return events;
         }
 
         let horizontal = input.horizontal.clamp(-1.0, 1.0);
@@ -178,27 +333,30 @@ impl GameState {
             self.player.grounded = false;
             self.player.jump_buffer = 0.0;
             self.player.coyote_timer = 0.0;
+            events.jumped = true;
         }
 
         self.player.velocity.y = (self.player.velocity.y + GRAVITY * dt).min(MAX_FALL_SPEED);
-        self.move_horizontally(fixed, dt);
-        self.move_vertically(fixed, dt);
+        self.move_horizontally(fixed, stage, dt);
+        self.move_vertically(fixed, stage, dt);
 
-        if intersects(self.player.rect(), BEACON) {
-            fixed.arm();
+        if intersects(self.player.rect(), stage.beacon) {
+            events.fixed_point_activated = fixed.arm();
         }
-        if intersects(self.player.rect(), GOAL) {
+        if intersects(self.player.rect(), stage.goal) {
             self.completed = true;
             self.player.velocity = Vec2::ZERO;
+            events.completed = true;
         }
         self.player.animation_phase = (self.player.animation_phase
             + self.player.velocity.x.abs() * dt * 0.035)
             % std::f32::consts::TAU;
+        events
     }
 
-    fn move_horizontally(&mut self, fixed: &FixedPointState, dt: f32) {
+    fn move_horizontally(&mut self, fixed: &FixedPointState, stage: &Stage, dt: f32) {
         self.player.position.x += self.player.velocity.x * dt;
-        for solid in collision_solids(fixed) {
+        for solid in collision_solids(stage, fixed) {
             let player = self.player.rect();
             if !intersects(player, solid) {
                 continue;
@@ -212,10 +370,10 @@ impl GameState {
         }
     }
 
-    fn move_vertically(&mut self, fixed: &FixedPointState, dt: f32) {
+    fn move_vertically(&mut self, fixed: &FixedPointState, stage: &Stage, dt: f32) {
         self.player.position.y += self.player.velocity.y * dt;
         self.player.grounded = false;
-        for solid in collision_solids(fixed) {
+        for solid in collision_solids(stage, fixed) {
             let player = self.player.rect();
             if !intersects(player, solid) {
                 continue;
@@ -233,7 +391,7 @@ impl GameState {
 
 impl SnapshotState for GameState {
     fn encode_snapshot(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(31);
+        let mut bytes = Vec::with_capacity(34);
         for value in [
             self.player.position.x,
             self.player.position.y,
@@ -287,19 +445,15 @@ impl SnapshotState for GameState {
     }
 }
 
-pub fn static_solids() -> [Rect; 3] {
-    [FLOOR, FIRST_BLOCK, LAST_BLOCK]
-}
-
-fn collision_solids(fixed: &FixedPointState) -> [Rect; 6] {
-    [
-        FLOOR,
-        FIRST_BLOCK,
-        LAST_BLOCK,
+fn collision_solids<'a>(
+    stage: &'a Stage,
+    fixed: &'a FixedPointState,
+) -> impl Iterator<Item = Rect> + 'a {
+    stage.solids.iter().copied().chain([
         Rect::new(-40.0, 0.0, 40.0, WORLD_HEIGHT),
         Rect::new(WORLD_WIDTH, 0.0, 40.0, WORLD_HEIGHT),
-        fixed.door_rect(),
-    ]
+        fixed.door_rect(stage),
+    ])
 }
 
 pub fn intersects(left: Rect, right: Rect) -> bool {
@@ -322,16 +476,6 @@ mod tests {
     use super::*;
     use crate::timeline::Timeline;
 
-    fn auto_input(state: &GameState) -> InputFrame {
-        let x = state.player.position.x;
-        let needs_jump =
-            state.player.grounded && ((230.0..410.0).contains(&x) || (900.0..1080.0).contains(&x));
-        InputFrame {
-            horizontal: 1.0,
-            jump_pressed: needs_jump,
-        }
-    }
-
     #[test]
     fn snapshot_round_trip_is_exact() {
         let mut state = GameState::default();
@@ -346,58 +490,127 @@ mod tests {
     }
 
     #[test]
-    fn closed_gate_blocks_a_forward_only_run() {
-        let mut state = GameState::default();
+    fn first_stage_still_blocks_a_forward_only_run() {
+        let stage = stage(0);
+        let mut state = GameState::new(stage);
         let mut fixed = FixedPointState::default();
         for _ in 0..600 {
             fixed.step_forward(FIXED_DT);
-            let input = auto_input(&state);
-            state.step(input, &mut fixed, FIXED_DT);
+            let input = stage_one_input(&state, 1.0);
+            state.step(input, &mut fixed, stage, FIXED_DT);
         }
         assert!(fixed.door_armed);
         assert!(!fixed.door_latched);
-        assert!(state.player.position.x <= DOOR_X - PLAYER_WIDTH + 0.1);
+        assert!(state.player.position.x <= stage.door_x - PLAYER_WIDTH + 0.1);
         assert!(!state.completed);
     }
 
     #[test]
-    fn rewind_opens_the_fixed_point_gate_and_stage_is_solvable() {
-        let mut state = GameState::default();
+    fn every_stage_has_a_scripted_rewind_solution() {
+        for stage_index in 0..STAGES.len() {
+            assert!(
+                solve_stage(stage_index),
+                "stage {stage_index} was not solvable"
+            );
+        }
+    }
+
+    fn solve_stage(stage_index: usize) -> bool {
+        let stage = stage(stage_index);
+        let mut state = GameState::new(stage);
         let mut fixed = FixedPointState::default();
         let mut timeline = Timeline::new(&state, HISTORY_FRAMES, 120).unwrap();
 
-        for _ in 0..500 {
+        for _ in 0..900 {
             fixed.step_forward(FIXED_DT);
-            let input = auto_input(&state);
-            state.step(input, &mut fixed, FIXED_DT);
+            let input = match stage_index {
+                0 => stage_one_input(&state, 1.0),
+                1 => InputFrame {
+                    horizontal: 1.0,
+                    jump_pressed: false,
+                },
+                2 => stage_three_input(&state, 1.0),
+                _ => unreachable!(),
+            };
+            state.step(input, &mut fixed, stage, FIXED_DT);
             timeline.record(&state).unwrap();
-            if fixed.door_armed && state.player.position.x > 700.0 {
+            if fixed.door_armed {
                 break;
             }
         }
-        assert!(
-            fixed.door_armed,
-            "the scripted player did not reach the fixed point"
-        );
-
-        while !fixed.door_latched {
-            assert!(timeline.rewind(&mut state).unwrap());
-            fixed.step_rewind(FIXED_DT);
+        if !fixed.door_armed {
+            return false;
         }
-        assert!(state.player.position.x < DOOR_X);
 
-        for _ in 0..600 {
+        for _ in 0..900 {
+            if !timeline.rewind(&mut state).unwrap() {
+                return false;
+            }
+            fixed.step_rewind(FIXED_DT);
+            let ready = match stage_index {
+                0 => fixed.door_latched && state.player.position.x < 470.0,
+                1 => {
+                    fixed.door_latched
+                        && state.player.position.y < stage.door_floor_y
+                        && state.player.position.x < 330.0
+                }
+                2 => fixed.door_latched && state.player.position.x < 650.0,
+                _ => unreachable!(),
+            };
+            if ready {
+                break;
+            }
+        }
+        if !fixed.door_latched {
+            return false;
+        }
+
+        for _ in 0..1_200 {
             fixed.step_forward(FIXED_DT);
-            let input = auto_input(&state);
-            state.step(input, &mut fixed, FIXED_DT);
+            let input = match stage_index {
+                0 => stage_one_input(&state, 1.0),
+                1 => stage_two_finish_input(&state),
+                2 => stage_three_input(&state, -1.0),
+                _ => unreachable!(),
+            };
+            state.step(input, &mut fixed, stage, FIXED_DT);
             timeline.record(&state).unwrap();
             if state.completed {
-                break;
+                return true;
             }
         }
-        assert!(
-            state.completed,
-            "the scripted solution did not reach the exit"
-        );
+        false
+    }
+
+    fn stage_one_input(state: &GameState, direction: f32) -> InputFrame {
+        let x = state.player.position.x;
+        let needs_jump =
+            state.player.grounded && ((230.0..410.0).contains(&x) || (900.0..1080.0).contains(&x));
+        InputFrame {
+            horizontal: direction,
+            jump_pressed: needs_jump,
+        }
+    }
+
+    fn stage_two_finish_input(state: &GameState) -> InputFrame {
+        let x = state.player.position.x;
+        InputFrame {
+            horizontal: 1.0,
+            jump_pressed: state.player.grounded
+                && ((270.0..430.0).contains(&x) || (880.0..1050.0).contains(&x)),
+        }
+    }
+
+    fn stage_three_input(state: &GameState, direction: f32) -> InputFrame {
+        let x = state.player.position.x;
+        let needs_jump = if direction > 0.0 {
+            (690.0..870.0).contains(&x)
+        } else {
+            (270.0..470.0).contains(&x)
+        };
+        InputFrame {
+            horizontal: direction,
+            jump_pressed: state.player.grounded && needs_jump,
+        }
     }
 }

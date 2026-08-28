@@ -1,6 +1,6 @@
 # UNRUN: FIXED POINT
 
-完全な世界を毎フレーム複製せず、**内容アドレス方式の差分 snapshot** から時間を巻き戻す、1 ステージ構成の 2D パズルプラットフォーマーです。Braid の「時間そのものを操作する」発想に影響を受けつつ、ゲームルールと snapshot engine をゼロから実装しています。
+完全な世界を毎フレーム複製せず、**内容アドレス方式の差分 snapshot** から時間を巻き戻す、3 ステージ構成の 2D パズルプラットフォーマーです。Braid の「時間そのものを操作する」発想に影響を受けつつ、ゲームルールと snapshot engine をゼロから実装しています。BGM と効果音は外部素材を使わず、Rust で生成した UK garage（132 BPM の 2-step / shuffle / sub-bass）ループと合成音です。
 
 外部画像・フォント・音声 asset は不要です。Rust と macroquad だけで Windows / macOS の両方で動作します。
 
@@ -24,20 +24,30 @@ cargo run
 | ジャンプ | `Space` / `W` / 上矢印 |
 | 時間を巻き戻す | `R` または左 `Shift` を押し続ける |
 | ステージをリセット | `Backspace` |
-| クリア後に再開 | `Enter` |
+| クリア後に次へ | `Enter` |
+| BGM / SE ミュート | `M` |
+
+BGM は UK garage のループを stereo WAV として runtime 生成し、`macroquad::audio` でループ再生します。ジャンプ・FIXED POINT 接触・ゲート固定・ステージクリアは合成効果音、巻き戻し中は専用のドローンが重なります。巻き戻し中は BGM を自動で duck します。`M` でミュートを切り替えられます。
 
 画面左上の `TIMELINE` が巻き戻せる時間です。最大 20 秒、60 fps 単位で記録されます。
 
 ## ステージのルール
 
-中央手前の黄色い結晶は **FIXED POINT** です。一度触れると、その事実だけは時間を巻き戻しても消えません。
+中央手前の黄色い結晶は **FIXED POINT** です。一度触れると、その事実だけは時間を巻き戻しても消えません。紫色のゲートは時間を巻き戻したときだけ開きます。
 
-1. 最初の障害物をジャンプし、FIXED POINT に触れる
-2. 紫色のゲートの前で `R` を押し続ける
-3. プレイヤーが過去へ戻る一方、時間に逆行するゲートだけが上へ開く
-4. ゲートが黄色に固定されたら、もう一度前進して出口へ向かう
+### Stage 1 — FIRST CONTACT
 
-前進だけでは閉じたゲートを通れません。「未来で結晶に触れ、その未来を消して過去へ情報だけを持ち帰る」のが解法です。
+チュートリアルです。最初の障害物を越えて FIXED POINT に触れ、ゲート前で `R` を長押しして開け、出口へ向かいます。
+
+### Stage 2 — THE DROP
+
+舞台は上下二層です。真ん中の 150px 幅の穴へ落ちると、地上へは戻れません。下層の奥にある FIXED POINT まで `→` で走り抜け、ゲートまで戻って `R` を長押しします。プレイヤーだけが再び上層へ戻り、二度目はゲートを越えて上層の出口へ進みます。
+
+### Stage 3 — B-SIDE
+
+スタート地点が左右の中央にあり、FIXED POINT は右奥、出口は左奥です。まず右へ進んで FIXED POINT を取り、今度は左へ引き返しながらゲート前で `R` を長押しします。進行方向そのものが反転するパズルです。
+
+前進だけではどの面の閉じたゲートも通れません。「未来で結晶に触れ、その未来を消して過去へ情報だけを持ち帰る」のが共通の解法です。
 
 ## 状態記録アーキテクチャ
 
@@ -84,9 +94,10 @@ FrameDelta { content_id }
 
 | ファイル | 役割 |
 | --- | --- |
+| `src/sound.rs` | UK garage ループと効果音の stereo WAV 生成（外部 asset なし） |
 | `src/timeline.rs` | BLAKE3 CAS、XOR 差分、checkpoint、GC、frame rewind |
-| `src/world.rs` | platformer 物理、collision、stage、snapshot codec、固定点 rule |
-| `src/main.rs` | macroquad loop、入力、vector 描画、HUD、巻き戻し演出 |
+| `src/world.rs` | platformer 物理、collision、stage 定義、snapshot codec、固定点 rule |
+| `src/main.rs` | macroquad loop、入力、audio 再生、vector 描画、HUD、巻き戻し演出 |
 
 ## 検証
 
@@ -109,8 +120,9 @@ cargo clippy --locked --all-targets -- -D warnings
 - 無変化 frame の CAS 重複排除
 - 履歴上限と可変長 snapshot fallback
 - GameState の byte 単位 round trip
-- 前進だけではゲートを通れないこと
-- 固定点を有効化し、巻き戻した場合だけ自動プレイヤーがステージをクリアできること
+- 前進だけでは Stage 1 のゲートを通れないこと
+- 全 3 ステージの scripted rewind 解法が成立すること
+- 生成した UK garage ループが有効な stereo WAV であること
 
 視覚 smoke test 用に `UNRUN_CAPTURE_PATH` を設定すると、起動後の frame を PNG へ書き出して自動終了します。
 
