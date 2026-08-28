@@ -9,12 +9,14 @@ use unrun::world::{
 
 const CHECKPOINT_INTERVAL: usize = 120;
 const MAX_FRAME_STEPS: usize = 8;
+const WINDOW_WIDTH: i32 = 1600;
+const WINDOW_HEIGHT: i32 = 900;
 
 fn window_conf() -> Conf {
     Conf {
         window_title: "UNRUN // FIXED POINT".to_owned(),
-        window_width: WORLD_WIDTH as i32,
-        window_height: WORLD_HEIGHT as i32,
+        window_width: WINDOW_WIDTH,
+        window_height: WINDOW_HEIGHT,
         high_dpi: true,
         window_resizable: true,
         sample_count: 4,
@@ -147,55 +149,56 @@ impl Game {
 
 #[macroquad::main(window_conf)]
 async fn main() {
-    let target = render_target(WORLD_WIDTH as u32, WORLD_HEIGHT as u32);
-    target.texture.set_filter(FilterMode::Linear);
-    let mut world_camera =
-        Camera2D::from_display_rect(Rect::new(0.0, 0.0, WORLD_WIDTH, WORLD_HEIGHT));
-    world_camera.render_target = Some(target.clone());
-
     let mut game = Game::new();
     // Enables deterministic visual smoke tests without changing normal play.
     let capture_path = std::env::var("UNRUN_CAPTURE_PATH").ok();
     let mut rendered_frames = 0;
     loop {
+        game.update(get_frame_time());
+
+        clear_background(color(3, 4, 12, 255));
+        let world_camera = responsive_world_camera();
+        set_camera(&world_camera);
+        render_world(&game);
+        set_default_camera();
+        rendered_frames += 1;
         if rendered_frames == 3 {
             if let Some(path) = &capture_path {
-                target.texture.get_texture_data().export_png(path);
+                export_screen_png(path);
                 return;
             }
         }
-        game.update(get_frame_time());
-
-        set_camera(&world_camera);
-        render_world(&game);
-        rendered_frames += 1;
-
-        set_default_camera();
-        clear_background(color(3, 4, 12, 255));
-        let scale = (screen_width() / WORLD_WIDTH).min(screen_height() / WORLD_HEIGHT);
-        let size = vec2(WORLD_WIDTH * scale, WORLD_HEIGHT * scale);
-        let offset = vec2(
-            (screen_width() - size.x) * 0.5,
-            (screen_height() - size.y) * 0.5,
-        );
-        draw_texture_ex(
-            &target.texture,
-            offset.x,
-            offset.y,
-            WHITE,
-            DrawTextureParams {
-                dest_size: Some(size),
-                flip_y: true,
-                ..Default::default()
-            },
-        );
 
         next_frame().await;
     }
 }
 
+fn responsive_world_camera() -> Camera2D {
+    let screen_aspect = screen_width().max(1.0) / screen_height().max(1.0);
+    let world_aspect = WORLD_WIDTH / WORLD_HEIGHT;
+    let display = if screen_aspect > world_aspect {
+        let width = WORLD_HEIGHT * screen_aspect;
+        Rect::new((WORLD_WIDTH - width) * 0.5, 0.0, width, WORLD_HEIGHT)
+    } else {
+        let height = WORLD_WIDTH / screen_aspect;
+        Rect::new(0.0, (WORLD_HEIGHT - height) * 0.5, WORLD_WIDTH, height)
+    };
+    Camera2D::from_display_rect(display)
+}
+
+fn export_screen_png(path: &str) {
+    let mut image = get_screen_data();
+    let row_bytes = image.width() * 4;
+    for y in 0..image.height() / 2 {
+        let top = y * row_bytes;
+        let bottom = (image.height() - y - 1) * row_bytes;
+        let (upper, lower) = image.bytes.split_at_mut(bottom);
+        upper[top..top + row_bytes].swap_with_slice(&mut lower[..row_bytes]);
+    }
+    image.export_png(path);
+}
+
 fn render_world(game: &Game) {
-    clear_background(color(8, 10, 25, 255));
     draw_background(game.rewind_active);
     draw_level_geometry();
     draw_time_cable(&game.fixed);
@@ -554,20 +557,20 @@ fn draw_rewind_overlay() {
 fn draw_hud(game: &Game) {
     let stats = game.timeline.stats();
     let panel = color(7, 10, 23, 210);
-    draw_rectangle(28.0, 24.0, 430.0, 89.0, panel);
-    draw_rectangle_lines(28.0, 24.0, 430.0, 89.0, 1.0, color(75, 107, 139, 120));
+    draw_rectangle(28.0, 22.0, 470.0, 105.0, panel);
+    draw_rectangle_lines(28.0, 22.0, 470.0, 105.0, 1.0, color(75, 107, 139, 120));
 
-    small_text("TIMELINE / 20 SEC", 45.0, 47.0, color(144, 175, 193, 255));
+    small_text("TIMELINE / 20 SEC", 45.0, 50.0, color(171, 200, 214, 255));
     let bar_x = 45.0;
-    let bar_y = 61.0;
-    let bar_w = 300.0;
+    let bar_y = 66.0;
+    let bar_w = 330.0;
     let fill = stats.rewindable_frames as f32 / stats.capacity_frames.max(1) as f32;
-    draw_rectangle(bar_x, bar_y, bar_w, 10.0, color(28, 36, 57, 255));
+    draw_rectangle(bar_x, bar_y, bar_w, 12.0, color(28, 36, 57, 255));
     draw_rectangle(
         bar_x,
         bar_y,
         bar_w * fill,
-        10.0,
+        12.0,
         if game.rewind_active {
             color(76, 228, 240, 255)
         } else {
@@ -576,12 +579,12 @@ fn draw_hud(game: &Game) {
     );
     for tick in 0..=10 {
         let x = bar_x + tick as f32 * bar_w / 10.0;
-        draw_line(x, bar_y, x, bar_y + 10.0, 1.0, color(8, 12, 25, 160));
+        draw_line(x, bar_y, x, bar_y + 12.0, 1.0, color(8, 12, 25, 160));
     }
     small_text(
         &format!("{:.1}s", stats.rewindable_frames as f32 / 60.0),
-        360.0,
-        71.0,
+        392.0,
+        79.0,
         color(214, 234, 237, 255),
     );
     small_text(
@@ -592,8 +595,8 @@ fn draw_hud(game: &Game) {
             stats.payload_saving_percent()
         ),
         45.0,
-        95.0,
-        color(89, 128, 151, 255),
+        108.0,
+        color(121, 158, 178, 255),
     );
 
     let (step, objective, objective_color) = if !game.fixed.door_armed {
@@ -607,27 +610,27 @@ fn draw_hud(game: &Game) {
             color(83, 224, 220, 255),
         )
     };
-    let width = 515.0;
+    let width = 535.0;
     let x = WORLD_WIDTH - width - 28.0;
-    draw_rectangle(x, 24.0, width, 49.0, panel);
-    draw_rectangle(x, 24.0, 5.0, 49.0, objective_color);
-    small_text(step, x + 20.0, 54.0, color(117, 143, 160, 255));
-    draw_text(objective, x + 58.0, 56.0, 22.0, objective_color);
+    draw_rectangle(x, 22.0, width, 58.0, panel);
+    draw_rectangle(x, 22.0, 6.0, 58.0, objective_color);
+    small_text(step, x + 21.0, 59.0, color(146, 172, 188, 255));
+    world_text(objective, x + 61.0, 61.0, 25, objective_color);
 
     if game.rewind_active {
         centered_text(
             "< <  REWINDING  < <",
             WORLD_WIDTH * 0.5,
-            113.0,
-            20,
+            126.0,
+            23,
             color(99, 235, 244, 230),
         );
     } else if game.rewind_blocked_flash > 0.0 {
         centered_text(
             "BEGINNING OF TIMELINE",
             WORLD_WIDTH * 0.5,
-            113.0,
-            18,
+            126.0,
+            21,
             color(232, 102, 174, (game.rewind_blocked_flash * 255.0) as u8),
         );
     }
@@ -667,14 +670,14 @@ fn draw_world_labels(fixed: &FixedPointState) {
             "HOLD  R",
             DOOR_X + 21.0,
             470.0,
-            22,
+            25,
             color(226, 91, 178, 240),
         );
         centered_text(
             "THIS GATE RUNS BACKWARD",
             DOOR_X + 21.0,
-            492.0,
-            12,
+            495.0,
+            15,
             color(141, 89, 139, 230),
         );
     }
@@ -705,7 +708,7 @@ fn draw_completion(game: &Game) {
         "THE GATE REMEMBERED A FUTURE YOU ERASED.",
         WORLD_WIDTH * 0.5,
         y + 119.0,
-        17,
+        20,
         color(151, 181, 192, 255),
     );
     let stats: TimelineStats = game.timeline.stats();
@@ -717,14 +720,14 @@ fn draw_completion(game: &Game) {
         ),
         WORLD_WIDTH * 0.5,
         y + 164.0,
-        16,
+        18,
         color(92, 220, 222, 255),
     );
     centered_text(
         "ENTER / PLAY AGAIN     R / REWIND THE ENDING",
         WORLD_WIDTH * 0.5,
         y + 226.0,
-        15,
+        18,
         color(213, 224, 219, 230),
     );
 }
@@ -738,17 +741,34 @@ fn color(red: u8, green: u8, blue: u8, alpha: u8) -> Color {
 }
 
 fn small_text(text: &str, x: f32, y: f32, tint: Color) {
-    draw_text(text, x, y, 13.0, tint);
+    world_text(text, x, y, 16, tint);
 }
 
 fn centered_text(text: &str, center_x: f32, baseline_y: f32, size: u16, tint: Color) {
-    let dimensions = measure_text(text, None, size, 1.0);
-    draw_text(
+    let (raster_size, font_scale, font_aspect) = camera_font_scale(size as f32);
+    let dimensions = measure_text(text, None, raster_size.max(1), font_scale);
+    world_text(
         text,
-        center_x - dimensions.width * 0.5,
+        center_x - dimensions.width * font_aspect * 0.5,
         baseline_y,
-        size as f32,
+        size,
         tint,
+    );
+}
+
+fn world_text(text: &str, x: f32, y: f32, size: u16, tint: Color) {
+    let (raster_size, font_scale, font_scale_aspect) = camera_font_scale(size as f32);
+    draw_text_ex(
+        text,
+        x,
+        y,
+        TextParams {
+            font_size: raster_size.max(1),
+            font_scale,
+            font_scale_aspect,
+            color: tint,
+            ..Default::default()
+        },
     );
 }
 

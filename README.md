@@ -4,6 +4,8 @@
 
 外部画像・フォント・音声 asset は不要です。Rust と macroquad だけで Windows / macOS の両方で動作します。
 
+描画は固定解像度の中間 texture を使わず、OS が提供する native framebuffer へ直接出力します。Retina などの高 DPI 環境では物理解像度に合わせて glyph を再 rasterize するため、ウィンドウを拡大しても文字がぼけません。
+
 ## 起動
 
 Rust 1.85 以降が必要です。
