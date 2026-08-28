@@ -11,8 +11,9 @@ use unrun::sound::{
 use unrun::timeline::{Timeline, TimelineStats};
 use unrun::visual_test::{draw_orientation_probe, validate_orientation};
 use unrun::world::{
-    FIXED_DT, FixedPointState, GameState, HISTORY_FRAMES, InputFrame, PLAYER_WIDTH, STAGES, Stage,
-    StepEvents, WORLD_HEIGHT, WORLD_WIDTH, stage,
+    BONUS_PUZZLES, BONUS_TERMINALS, FIXED_DT, FixedPointState, GameState, HISTORY_FRAMES,
+    InputFrame, PLAYER_WIDTH, STAGES, Stage, StepEvents, WORLD_HEIGHT, WORLD_WIDTH,
+    bonus_all_solved, is_bonus_stage, stage, validate_bonus_puzzle,
 };
 
 const CHECKPOINT_INTERVAL: usize = 120;
@@ -50,6 +51,14 @@ struct Game {
     rewind_blocked_flash: f32,
     ghost_timer: usize,
     ghosts: VecDeque<Ghost>,
+    bonus_solved: [bool; 3],
+    bonus_notify_timer: f32,
+    bonus_notify_text: String,
+    editor_open: bool,
+    editor_terminal: usize,
+    editor_text: String,
+    editor_status: String,
+    editor_status_is_error: bool,
 }
 
 #[derive(Default)]
@@ -86,6 +95,56 @@ impl Game {
             rewind_blocked_flash: 0.0,
             ghost_timer: 0,
             ghosts: VecDeque::new(),
+            bonus_solved: [false; 3],
+            bonus_notify_timer: 0.0,
+            bonus_notify_text: String::new(),
+            editor_open: false,
+            editor_terminal: 0,
+            editor_text: String::new(),
+            editor_status: String::new(),
+            editor_status_is_error: false,
+        }
+    }
+
+    fn open_editor(&mut self, terminal: usize) {
+        self.editor_open = true;
+        self.editor_terminal = terminal;
+        self.editor_text = BONUS_PUZZLES[terminal].starter.to_owned();
+        self.editor_status = "Edit the Rust code - Ctrl+Enter to compile, Esc to close.".to_owned();
+        self.editor_status_is_error = false;
+    }
+
+    fn close_editor(&mut self) {
+        self.editor_open = false;
+        self.editor_status.clear();
+    }
+
+    fn submit_editor(&mut self) -> bool {
+        let solved = validate_bonus_puzzle(self.editor_terminal, &self.editor_text);
+        if solved {
+            self.bonus_solved[self.editor_terminal] = true;
+            self.editor_status = BONUS_PUZZLES[self.editor_terminal].success.to_owned();
+            self.editor_status_is_error = false;
+            if bonus_all_solved(&self.bonus_solved) && !self.fixed.door_armed {
+                self.fixed.arm();
+                self.bonus_notify_text = "ANOMALY RECOMPILED - FIXED POINT ARMED".to_owned();
+                self.bonus_notify_timer = 3.0;
+            } else if solved {
+                self.bonus_notify_text = format!(
+                    "TERMINAL {}/3 - {}",
+                    self.bonus_solved.iter().filter(|&&v| v).count(),
+                    BONUS_PUZZLES[self.editor_terminal].success
+                );
+                self.bonus_notify_timer = 2.2;
+            }
+            true
+        } else {
+            self.editor_status = format!(
+                "error[E0001]: check failed - {}",
+                BONUS_PUZZLES[self.editor_terminal].hint
+            );
+            self.editor_status_is_error = true;
+            false
         }
     }
 
@@ -101,8 +160,88 @@ impl Game {
         *self = Self::new(self.stage_index);
     }
 
+    fn nearby_bonus_terminal(&self) -> Option<usize> {
+        if !is_bonus_stage(self.stage_index) {
+            return None;
+        }
+        let player = self.state.player.rect();
+        let expanded =
+            |rect: Rect| Rect::new(rect.x - 18.0, rect.y - 18.0, rect.w + 36.0, rect.h + 36.0);
+        for (index, &terminal) in BONUS_TERMINALS.iter().enumerate() {
+            if self.bonus_solved[index] {
+                continue;
+            }
+            let area = expanded(terminal);
+            if area.x < player.x + player.w
+                && area.x + area.w > player.x
+                && area.y < player.y + player.h
+                && area.y + area.h > player.y
+            {
+                return Some(index);
+            }
+        }
+        None
+    }
+
+    fn update_editor(&mut self) -> Option<bool> {
+        if is_key_pressed(KeyCode::Escape) {
+            self.close_editor();
+            return None;
+        }
+        // Submit with Ctrl+Enter or F5 or Cmd+Enter
+        let ctrl = is_key_down(KeyCode::LeftControl) || is_key_down(KeyCode::RightControl);
+        if (ctrl && is_key_pressed(KeyCode::Enter)) || is_key_pressed(KeyCode::F5) {
+            let ok = self.submit_editor();
+            return Some(ok);
+        }
+        if is_key_pressed(KeyCode::Tab) {
+            self.editor_text.push_str("    ");
+        }
+        if is_key_pressed(KeyCode::Enter) && !ctrl {
+            self.editor_text.push('\n');
+        }
+        if is_key_pressed(KeyCode::Backspace) {
+            self.editor_text.pop();
+        }
+        while let Some(ch) = get_char_pressed() {
+            if ch == '\n' || ch == '\r' || ch == '\t' {
+                continue;
+            }
+            if ch.is_control() {
+                continue;
+            }
+            self.editor_text.push(ch);
+        }
+        None
+    }
+
     fn update(&mut self, frame_dt: f32) -> GameEvents {
         let mut events = GameEvents::default();
+        self.bonus_notify_timer = (self.bonus_notify_timer - frame_dt).max(0.0);
+
+        if self.editor_open {
+            if let Some(ok) = self.update_editor() {
+                if ok {
+                    events.fixed_point_activated = true;
+                    if bonus_all_solved(&self.bonus_solved) {
+                        events.gate_latched = true;
+                    }
+                }
+            }
+            self.accumulator = 0.0;
+            self.rewind_active = false;
+            return events;
+        }
+
+        if is_bonus_stage(self.stage_index) {
+            if let Some(terminal) = self.nearby_bonus_terminal() {
+                if is_key_pressed(KeyCode::E) {
+                    self.open_editor(terminal);
+                    return events;
+                }
+            }
+        }
+
         if is_key_pressed(KeyCode::Backspace) {
             self.reset();
             events.stage_changed = true;
@@ -293,7 +432,14 @@ impl AudioSystem {
 #[macroquad::main(window_conf)]
 async fn main() {
     let visual_test = std::env::args().any(|argument| argument == "--visual-test");
-    let mut game = Game::new(0);
+    let start_stage = std::env::var("UNRUN_START_STAGE")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let mut game = Game::new(start_stage);
+    if std::env::var("UNRUN_EDITOR_CAPTURE").is_ok() && is_bonus_stage(game.stage_index) {
+        game.open_editor(0);
+    }
     let mut audio = if visual_test {
         None
     } else {
@@ -369,6 +515,9 @@ fn render_world(game: &Game, muted: bool) {
     let current_stage = game.current_stage();
     draw_background(current_stage, game.rewind_active);
     draw_level_geometry(current_stage);
+    if is_bonus_stage(game.stage_index) {
+        draw_bonus_terminals(game);
+    }
     draw_time_cable(&game.fixed, current_stage);
     draw_beacon(&game.fixed, current_stage);
     draw_gate(&game.fixed, current_stage);
@@ -390,6 +539,31 @@ fn render_world(game: &Game, muted: bool) {
     }
     draw_hud(game);
     draw_world_labels(game, muted);
+    if game.bonus_notify_timer > 0.0 {
+        draw_bonus_notification(game);
+    }
+    if game.editor_open {
+        draw_editor(game);
+    } else if is_bonus_stage(game.stage_index) {
+        if let Some(terminal) = game.nearby_bonus_terminal() {
+            let rect = BONUS_TERMINALS[terminal];
+            centered_text(
+                if game.bonus_solved[terminal] {
+                    "SOLVED"
+                } else {
+                    "E / HACK"
+                },
+                rect.x + rect.w * 0.5,
+                rect.y - 14.0,
+                16,
+                if game.bonus_solved[terminal] {
+                    color(110, 220, 140, 255)
+                } else {
+                    color(255, 220, 110, 255)
+                },
+            );
+        }
+    }
 
     if game.state.completed {
         draw_completion(game);
@@ -576,6 +750,191 @@ fn draw_beacon(fixed: &FixedPointState, stage: &Stage) {
         color(255, 221, 133, if fixed.door_armed { 180 } else { 55 }),
     );
     draw_circle(center.x, center.y, 4.0, color(255, 245, 205, 255));
+}
+
+fn draw_bonus_terminals(game: &Game) {
+    for (index, &terminal) in BONUS_TERMINALS.iter().enumerate() {
+        let solved = game.bonus_solved[index];
+        let pulse = 0.5 + 0.5 * (get_time() as f32 * 2.6 + index as f32 * 1.3).sin();
+        let base = if solved {
+            color(80, 190, 120, 255)
+        } else {
+            color(70, 170, 190, 255)
+        };
+        let glow = if solved {
+            color(80, 190, 120, (30.0 + pulse * 22.0) as u8)
+        } else {
+            color(70, 170, 190, (18.0 + pulse * 18.0) as u8)
+        };
+        let center = vec2(terminal.x + terminal.w * 0.5, terminal.y + 22.0);
+        draw_circle(center.x, center.y, 30.0 + pulse * 4.0, glow);
+        draw_rectangle(
+            terminal.x + 6.0,
+            terminal.y + terminal.h - 10.0,
+            terminal.w - 12.0,
+            10.0,
+            color(32, 38, 48, 255),
+        );
+        draw_rectangle(
+            terminal.x,
+            terminal.y,
+            terminal.w,
+            terminal.h,
+            color(22, 28, 38, 220),
+        );
+        draw_rectangle_lines(terminal.x, terminal.y, terminal.w, terminal.h, 2.0, base);
+        // Screen
+        draw_rectangle(
+            terminal.x + 6.0,
+            terminal.y + 6.0,
+            terminal.w - 12.0,
+            28.0,
+            if solved {
+                color(28, 52, 42, 255)
+            } else {
+                color(28, 42, 52, 255)
+            },
+        );
+        let icon = if solved { "✓" } else { ">" };
+        centered_text(icon, center.x, terminal.y + 24.0, 22, base);
+        // Label
+        let label = BONUS_PUZZLES[index].title;
+        small_text(label, terminal.x - 6.0, terminal.y - 10.0, base);
+    }
+}
+
+fn draw_bonus_notification(game: &Game) {
+    let alpha = (game.bonus_notify_timer * 1.2).min(1.0);
+    let bg = color(10, 16, 28, (210.0 * alpha) as u8);
+    let fg = color(180, 230, 255, (255.0 * alpha) as u8);
+    draw_rectangle(WORLD_WIDTH * 0.5 - 320.0, 142.0, 640.0, 32.0, bg);
+    draw_rectangle_lines(
+        WORLD_WIDTH * 0.5 - 320.0,
+        142.0,
+        640.0,
+        32.0,
+        1.0,
+        color(90, 180, 220, (180.0 * alpha) as u8),
+    );
+    centered_text(&game.bonus_notify_text, WORLD_WIDTH * 0.5, 162.0, 16, fg);
+}
+
+fn draw_editor(game: &Game) {
+    draw_rectangle(0.0, 0.0, WORLD_WIDTH, WORLD_HEIGHT, color(6, 9, 18, 210));
+    let puzzle = &BONUS_PUZZLES[game.editor_terminal];
+    let panel_x = 128.0;
+    let panel_y = 72.0;
+    let panel_w = WORLD_WIDTH - panel_x * 2.0;
+    let panel_h = WORLD_HEIGHT - panel_y * 2.0;
+    draw_rectangle(panel_x, panel_y, panel_w, panel_h, color(12, 16, 28, 245));
+    draw_rectangle_lines(
+        panel_x,
+        panel_y,
+        panel_w,
+        panel_h,
+        2.0,
+        color(90, 160, 200, 220),
+    );
+    draw_rectangle(panel_x, panel_y, panel_w, 34.0, color(18, 28, 44, 255));
+    small_text(
+        &format!(
+            "BONUS TERMINAL {}/3 - {}  // {}",
+            game.editor_terminal + 1,
+            puzzle.title,
+            puzzle.subtitle
+        ),
+        panel_x + 16.0,
+        panel_y + 22.0,
+        color(160, 210, 240, 255),
+    );
+    small_text(
+        "ESC / CLOSE   Ctrl+Enter / COMPILE",
+        panel_x + panel_w - 268.0,
+        panel_y + 22.0,
+        color(90, 130, 150, 255),
+    );
+    // Prompt
+    let prompt_y = panel_y + 56.0;
+    let mut y = prompt_y;
+    for line in puzzle.prompt.split('\n') {
+        small_text(line, panel_x + 16.0, y, color(180, 200, 215, 255));
+        y += 16.0;
+    }
+    y += 6.0;
+    draw_line(
+        panel_x + 16.0,
+        y,
+        panel_x + panel_w - 16.0,
+        y,
+        1.0,
+        color(50, 70, 90, 120),
+    );
+    y += 14.0;
+    // Code area
+    draw_rectangle(
+        panel_x + 12.0,
+        y,
+        panel_w - 24.0,
+        320.0,
+        color(8, 12, 20, 255),
+    );
+    draw_rectangle_lines(
+        panel_x + 12.0,
+        y,
+        panel_w - 24.0,
+        320.0,
+        1.0,
+        color(60, 80, 100, 160),
+    );
+    let mut code_y = y + 18.0;
+    let lines: Vec<&str> = game.editor_text.split('\n').collect();
+    for line in &lines {
+        // Simple tab expansion for display
+        let display = line.replace('\t', "    ");
+        small_text(&display, panel_x + 22.0, code_y, color(210, 225, 235, 255));
+        code_y += 15.0;
+        if code_y > y + 308.0 {
+            break;
+        }
+    }
+    // Cursor
+    let cursor_blink = ((get_time() * 2.0) as i32) % 2 == 0;
+    if cursor_blink {
+        let last_line = lines.last().unwrap_or(&"");
+        let cursor_x = panel_x + 22.0 + last_line.len() as f32 * 7.2;
+        let cursor_y = code_y - 15.0;
+        draw_rectangle(
+            cursor_x,
+            cursor_y - 10.0,
+            8.0,
+            12.0,
+            color(160, 220, 255, 180),
+        );
+    }
+    let status_y = y + 338.0;
+    let status_color = if game.editor_status_is_error {
+        color(255, 120, 120, 255)
+    } else if game.bonus_solved[game.editor_terminal] {
+        color(120, 230, 140, 255)
+    } else {
+        color(150, 180, 200, 255)
+    };
+    small_text(&game.editor_status, panel_x + 16.0, status_y, status_color);
+    small_text(
+        puzzle.hint,
+        panel_x + 16.0,
+        status_y + 16.0,
+        color(90, 120, 140, 255),
+    );
+    if game.bonus_solved[game.editor_terminal] {
+        centered_text(
+            "SOLVED - Press Esc to return to the timeline.",
+            WORLD_WIDTH * 0.5,
+            panel_y + panel_h - 18.0,
+            15,
+            color(120, 230, 140, 255),
+        );
+    }
 }
 
 fn draw_gate(fixed: &FixedPointState, stage: &Stage) {
@@ -815,14 +1174,43 @@ fn draw_hud(game: &Game) {
         color(121, 158, 178, 255),
     );
 
-    let (step, objective, objective_color) = if !game.fixed.door_armed {
-        ("01", "TOUCH THE FIXED POINT", color(244, 195, 83, 255))
+    let (step, objective, objective_color) = if is_bonus_stage(game.stage_index) {
+        let solved = game.bonus_solved.iter().filter(|&&v| v).count();
+        if solved < 3 {
+            (
+                "01",
+                format!("HACK {}/3 TERMINALS  -  E TO EDIT RUST", solved),
+                color(90, 200, 210, 255),
+            )
+        } else if !game.fixed.door_latched {
+            (
+                "02",
+                "HOLD R / REVERSE THE GATE".to_owned(),
+                color(225, 91, 177, 255),
+            )
+        } else {
+            (
+                "03",
+                "THE FORGE IS OPEN / REACH EXIT".to_owned(),
+                color(83, 224, 220, 255),
+            )
+        }
+    } else if !game.fixed.door_armed {
+        (
+            "01",
+            "TOUCH THE FIXED POINT".to_owned(),
+            color(244, 195, 83, 255),
+        )
     } else if !game.fixed.door_latched {
-        ("02", "HOLD R / REVERSE THE GATE", color(225, 91, 177, 255))
+        (
+            "02",
+            "HOLD R / REVERSE THE GATE".to_owned(),
+            color(225, 91, 177, 255),
+        )
     } else {
         (
             "03",
-            "THE FUTURE IS OPEN / REACH EXIT",
+            "THE FUTURE IS OPEN / REACH EXIT".to_owned(),
             color(83, 224, 220, 255),
         )
     };
@@ -831,7 +1219,7 @@ fn draw_hud(game: &Game) {
     draw_rectangle(x, 22.0, width, 58.0, panel);
     draw_rectangle(x, 22.0, 6.0, 58.0, objective_color);
     small_text(step, x + 21.0, 59.0, color(146, 172, 188, 255));
-    world_text(objective, x + 61.0, 61.0, 25, objective_color);
+    world_text(&objective, x + 61.0, 61.0, 25, objective_color);
 
     if game.rewind_active {
         centered_text(

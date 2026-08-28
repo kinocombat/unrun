@@ -90,6 +90,42 @@ const STAGE_THREE_SOLIDS: [Rect; 3] = [
     },
 ];
 
+const STAGE_BONUS_SOLIDS: [Rect; 2] = [
+    Rect {
+        x: 0.0,
+        y: 620.0,
+        w: WORLD_WIDTH,
+        h: 100.0,
+    },
+    Rect {
+        x: 620.0,
+        y: 540.0,
+        w: 88.0,
+        h: 80.0,
+    },
+];
+
+pub const BONUS_TERMINALS: [Rect; 3] = [
+    Rect {
+        x: 280.0,
+        y: 548.0,
+        w: 54.0,
+        h: 72.0,
+    },
+    Rect {
+        x: 600.0,
+        y: 468.0,
+        w: 54.0,
+        h: 72.0,
+    },
+    Rect {
+        x: 900.0,
+        y: 548.0,
+        w: 54.0,
+        h: 72.0,
+    },
+];
+
 #[derive(Clone, Copy, Debug)]
 pub struct Stage {
     pub name: &'static str,
@@ -103,6 +139,7 @@ pub struct Stage {
     pub door_x: f32,
     pub door_floor_y: f32,
     pub jump_hint: [f32; 2],
+    pub is_bonus: bool,
 }
 
 impl Stage {
@@ -111,7 +148,78 @@ impl Stage {
     }
 }
 
-pub const STAGES: [Stage; 3] = [
+pub const BONUS_STAGE_INDEX: usize = 3;
+
+#[derive(Clone, Copy, Debug)]
+pub struct BonusPuzzle {
+    pub title: &'static str,
+    pub subtitle: &'static str,
+    pub prompt: &'static str,
+    pub starter: &'static str,
+    pub hint: &'static str,
+    pub success: &'static str,
+}
+
+pub const BONUS_PUZZLES: [BonusPuzzle; 3] = [
+    BonusPuzzle {
+        title: "01 // OWNERSHIP",
+        subtitle: "TIMELINE OWNERSHIP",
+        prompt: "This code moves the timeline and then tries to use it again. Fix it so both `past` and `timeline` can be printed.",
+        starter: "fn main() {\n    let timeline = String::from(\"unrun\");\n    let past = timeline;\n    println!(\"{}\", timeline);\n}",
+        hint: "hint: clone() or borrow with & / .clone()",
+        success: "Timeline cloned - both futures can now be read.",
+    },
+    BonusPuzzle {
+        title: "02 // MATCH",
+        subtitle: "GATE STATE",
+        prompt: "The gate should be Open when the Fixed Point was touched and the rewind amount is at least 75 frames. Complete the match.",
+        starter: "enum Gate { Closed, Open }\nfn gate_state(fixed: bool, rewound: u32) -> Gate {\n    // TODO: return Open when fixed && rewound >= 75\n    Gate::Closed\n}",
+        hint: "hint: if fixed && rewound >= 75 { Gate::Open } else { Gate::Closed }",
+        success: "Gate logic compiled - Fixed Point now remembered.",
+    },
+    BonusPuzzle {
+        title: "03 // ITERATOR",
+        subtitle: "DELTA FILTER",
+        prompt: "Sum only the even numbers. Replace the stub with an iterator chain.",
+        starter: "fn sum_even(nums: &[i32]) -> i32 {\n    // TODO: use iter/filter/sum\n    0\n}",
+        hint: "hint: nums.iter().filter(|n| *n % 2 == 0).sum()",
+        success: "Delta filtered - only the changes remain.",
+    },
+];
+
+pub fn validate_bonus_puzzle(index: usize, code: &str) -> bool {
+    let lower = code.to_lowercase();
+    match index {
+        0 => {
+            // Ownership: must keep original usable
+            (lower.contains("clone()")
+                || lower.contains("&timeline")
+                || lower.contains("& timeline"))
+                && lower.contains("past")
+                && lower.contains("timeline")
+        }
+        1 => {
+            lower.contains("fixed")
+                && lower.contains("rewound")
+                && lower.contains("75")
+                && lower.contains("open")
+                && (lower.contains("if") || lower.contains("match"))
+        }
+        2 => {
+            lower.contains("iter")
+                && lower.contains("filter")
+                && (lower.contains("% 2") || lower.contains("%2"))
+                && (lower.contains("sum") || lower.contains("fold"))
+        }
+        _ => false,
+    }
+}
+
+pub fn is_bonus_stage(index: usize) -> bool {
+    index % STAGES.len() == BONUS_STAGE_INDEX
+}
+
+pub const STAGES: [Stage; 4] = [
     Stage {
         name: "FIRST CONTACT",
         subtitle: "TEACH THE GATE TO REMEMBER",
@@ -134,6 +242,7 @@ pub const STAGES: [Stage; 3] = [
         door_x: 790.0,
         door_floor_y: 620.0,
         jump_hint: [300.0, 526.0],
+        is_bonus: false,
     },
     Stage {
         name: "THE DROP",
@@ -157,6 +266,7 @@ pub const STAGES: [Stage; 3] = [
         door_x: 740.0,
         door_floor_y: 420.0,
         jump_hint: [315.0, 388.0],
+        is_bonus: false,
     },
     Stage {
         name: "B-SIDE",
@@ -180,6 +290,31 @@ pub const STAGES: [Stage; 3] = [
         door_x: 390.0,
         door_floor_y: 620.0,
         jump_hint: [760.0, 506.0],
+        is_bonus: false,
+    },
+    Stage {
+        name: "BONUS // RUST FORGE",
+        subtitle: "ANOMALY SOURCE / EDIT TO RECOMPILE",
+        spawn: [82.0, 572.0],
+        spawn_facing: 1.0,
+        solids: &STAGE_BONUS_SOLIDS,
+        base_floor_y: 620.0,
+        beacon: Rect {
+            x: 1080.0,
+            y: 548.0,
+            w: 54.0,
+            h: 72.0,
+        },
+        goal: Rect {
+            x: 1148.0,
+            y: 496.0,
+            w: 72.0,
+            h: 124.0,
+        },
+        door_x: 770.0,
+        door_floor_y: 620.0,
+        jump_hint: [508.0, 520.0],
+        is_bonus: true,
     },
 ];
 
@@ -340,7 +475,7 @@ impl GameState {
         self.move_horizontally(fixed, stage, dt);
         self.move_vertically(fixed, stage, dt);
 
-        if intersects(self.player.rect(), stage.beacon) {
+        if !stage.is_bonus && intersects(self.player.rect(), stage.beacon) {
             events.fixed_point_activated = fixed.arm();
         }
         if intersects(self.player.rect(), stage.goal) {
@@ -471,10 +606,36 @@ fn approach(current: f32, target: f32, amount: f32) -> f32 {
     }
 }
 
+pub fn bonus_all_solved(solved: &[bool; 3]) -> bool {
+    solved.iter().all(|&v| v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::timeline::Timeline;
+
+    #[test]
+    fn bonus_puzzle_validators_accept_correct_and_reject_broken() {
+        assert!(validate_bonus_puzzle(
+            0,
+            "let past = timeline.clone(); println!(\"{}\", timeline);"
+        ));
+        assert!(!validate_bonus_puzzle(
+            0,
+            "let past = timeline; println!(\"{}\", timeline);"
+        ));
+        assert!(validate_bonus_puzzle(
+            1,
+            "if fixed && rewound >= 75 { Gate::Open } else { Gate::Closed }"
+        ));
+        assert!(!validate_bonus_puzzle(1, "Gate::Closed"));
+        assert!(validate_bonus_puzzle(
+            2,
+            "nums.iter().filter(|n| *n % 2 == 0).sum()"
+        ));
+        assert!(!validate_bonus_puzzle(2, "0"));
+    }
 
     #[test]
     fn snapshot_round_trip_is_exact() {
@@ -521,25 +682,41 @@ mod tests {
         let mut fixed = FixedPointState::default();
         let mut timeline = Timeline::new(&state, HISTORY_FRAMES, 120).unwrap();
 
-        for _ in 0..900 {
-            fixed.step_forward(FIXED_DT);
-            let input = match stage_index {
-                0 => stage_one_input(&state, 1.0),
-                1 => InputFrame {
+        if is_bonus_stage(stage_index) {
+            // Bonus: simulate solving the three code terminals, then normal rewind flow.
+            for _ in 0..200 {
+                fixed.step_forward(FIXED_DT);
+                let input = InputFrame {
                     horizontal: 1.0,
-                    jump_pressed: false,
-                },
-                2 => stage_three_input(&state, 1.0),
-                _ => unreachable!(),
-            };
-            state.step(input, &mut fixed, stage, FIXED_DT);
-            timeline.record(&state).unwrap();
-            if fixed.door_armed {
-                break;
+                    jump_pressed: state.player.grounded
+                        && (550.0..700.0).contains(&state.player.position.x),
+                };
+                state.step(input, &mut fixed, stage, FIXED_DT);
+                timeline.record(&state).unwrap();
             }
-        }
-        if !fixed.door_armed {
-            return false;
+            // Solving the Rust puzzles arms the gate without needing the beacon.
+            fixed.arm();
+        } else {
+            for _ in 0..900 {
+                fixed.step_forward(FIXED_DT);
+                let input = match stage_index {
+                    0 => stage_one_input(&state, 1.0),
+                    1 => InputFrame {
+                        horizontal: 1.0,
+                        jump_pressed: false,
+                    },
+                    2 => stage_three_input(&state, 1.0),
+                    _ => unreachable!(),
+                };
+                state.step(input, &mut fixed, stage, FIXED_DT);
+                timeline.record(&state).unwrap();
+                if fixed.door_armed {
+                    break;
+                }
+            }
+            if !fixed.door_armed {
+                return false;
+            }
         }
 
         for _ in 0..900 {
@@ -555,6 +732,7 @@ mod tests {
                         && state.player.position.x < 330.0
                 }
                 2 => fixed.door_latched && state.player.position.x < 650.0,
+                3 => fixed.door_latched && state.player.position.x < 620.0,
                 _ => unreachable!(),
             };
             if ready {
@@ -571,6 +749,11 @@ mod tests {
                 0 => stage_one_input(&state, 1.0),
                 1 => stage_two_finish_input(&state),
                 2 => stage_three_input(&state, -1.0),
+                3 => InputFrame {
+                    horizontal: 1.0,
+                    jump_pressed: state.player.grounded
+                        && (550.0..700.0).contains(&state.player.position.x),
+                },
                 _ => unreachable!(),
             };
             state.step(input, &mut fixed, stage, FIXED_DT);
