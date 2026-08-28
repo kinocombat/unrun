@@ -1,0 +1,15 @@
+[package]
+name = "unrun"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A time-rewinding puzzle platformer powered by content-addressed delta snapshots"
+license = "MIT"
+
+[dependencies]
+blake3 = "1.8"
+macroquad = "0.4"
+
+[profile.release]
+lto = "thin"
+strip = true
