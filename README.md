@@ -1,8 +1,8 @@
 # UNRUN: FIXED POINT
 
-完全な世界を毎フレーム複製せず、**内容アドレス方式の差分 snapshot** から時間を巻き戻す、4 ステージ構成（3 + ボーナス）の 2D パズルプラットフォーマーです。Braid の「時間そのものを操作する」発想に影響を受けつつ、ゲームルールと snapshot engine をゼロから実装しています。BGM と効果音は外部素材を使わず、Rust で生成した UK garage（132 BPM の 2-step / shuffle / sub-bass）ループと合成音です。ボーナスステージでは同じ世界観のまま Rust の所有権・match・イテレータを編集してタイムラインを再コンパイルします。
+完全な世界を毎フレーム複製せず、**内容アドレス方式の差分 snapshot** から時間を巻き戻す、4 ステージ構成（3 + ボーナス）の 2D パズルプラットフォーマーです。Braid の「時間そのものを操作する」発想に影響を受けつつ、ゲームルールと snapshot engine をゼロから実装しています。BGM と効果音は外部素材を使わず、Rust で生成した UK garage（132 BPM の 2-step / shuffle / sub-bass）ループと合成音です。ボーナスステージでは同じ世界観のまま Rust の所有権・match・イテレータを題材にしたコードパズルを解きます。
 
-外部画像・フォント・音声 asset は不要です。Rust と macroquad だけで Windows / macOS の両方で動作します。
+外部画像・フォント・音声 asset は不要です。native Rust、macroquad、BLAKE3 を使用し、Linux / macOS / Windows で CI 検証しています。ブラウザ / WASM は対象外です。
 
 描画は固定解像度の中間 texture を使わず、OS が提供する native framebuffer へ直接出力します。Retina などの高 DPI 環境では物理解像度に合わせて glyph を再 rasterize するため、ウィンドウを拡大しても文字がぼけません。
 
@@ -27,7 +27,7 @@ cargo run
 | クリア後に次へ | `Enter` |
 | BGM / SE ミュート | `M` |
 | ボーナス端末をハック | `E`（端末の近くで） |
-| コードをコンパイル | `Ctrl+Enter` または `F5`（エディタ内） |
+| 回答コードをチェック | `Ctrl+Enter` または `F5`（エディタ内） |
 | エディタを閉じる | `Esc` |
 
 BGM は UK garage のループを stereo WAV として runtime 生成し、`macroquad::audio` でループ再生します。ジャンプ・FIXED POINT 接触・ゲート固定・ステージクリアは合成効果音、巻き戻し中は専用のドローンが重なります。巻き戻し中は BGM を自動で duck します。`M` でミュートを切り替えられます。
@@ -52,15 +52,15 @@ BGM は UK garage のループを stereo WAV として runtime 生成し、`macr
 
 ### Bonus — RUST FORGE
 
-クリア後に解放されるボーナスステージです。世界観はそのままに、タイムラインのソースが壊れています。ステージ内の 3 つの端末（`01 // OWNERSHIP` / `02 // MATCH` / `03 // ITERATOR`）に近づいて `E` でエディタを開き、Rust のコードを直接編集します。
+Stage 3 をクリアして `Enter` で進む第 4 ステージ（ボーナス）です。永続的な unlock や save はありません。世界観はそのままに、タイムラインのソースが壊れています。ステージ内の 3 つの端末（`01 // OWNERSHIP` / `02 // MATCH` / `03 // ITERATOR`）に近づいて `E` でエディタを開き、Rust 風の回答コードを編集します。
 
 - **OWNERSHIP**: `let past = timeline;` でムーブしてしまったタイムラインを `clone()` や `&` で借用できるように修正
 - **MATCH**: `fixed && rewound >= 75` のときだけ `Gate::Open` を返す分岐を実装
 - **ITERATOR**: `iter().filter(|n| *n % 2 == 0).sum()` で偶数だけを集計するイテレータチェーンを完成
 
-`Ctrl+Enter` でコンパイルし、成功すると端末が点灯。3 つとも成功すると `ANOMALY RECOMPILED` と表示され FIXED POINT が自動で点灯し、あとは通常通り `R` でゲートを開けて出口へ向かいます。Rust の所有権・パターンマッチ・イテレータが、そのままゲーム内の時間・ゲート・差分圧縮のメタファーになっています。
+`Ctrl+Enter` または `F5` で回答をチェックし、受理されると端末が点灯します。判定はコメントと文字列を除外した token 列を想定解と照合する簡易 validator であり、`rustc` によるコンパイルやコード実行は行いません。3 つとも受理されると `ANOMALY ACCEPTED` と表示され FIXED POINT が自動で点灯し、あとは通常通り `R` でゲートを開けて出口へ向かいます。Rust の所有権・パターンマッチ・イテレータが、そのままゲーム内の時間・ゲート・差分圧縮のメタファーになっています。
 
-前進だけではどの面の閉じたゲートも通れません。「未来で結晶に触れ、その未来を消して過去へ情報だけを持ち帰る」のが共通の解法です。
+前進だけではどの面の閉じたゲートも通れません。通常の 3 ステージでは「未来で結晶に触れ、その未来を消して過去へ情報だけを持ち帰る」のが共通の解法です。ボーナスでは 3 つの端末を解くと FIXED POINT が点灯します。
 
 ## 状態記録アーキテクチャ
 
@@ -82,12 +82,12 @@ FrameDelta { content_id }
 
 ### 2. Content-addressed store
 
-完全 checkpoint と差分 blob は、種別と内容から計算した 128-bit BLAKE3 ID で `HashMap` に格納します。
+差分 blob は、内容から計算した 128-bit BLAKE3 ID で `HashMap` に格納します。
 
 - 同一内容は同一 ID となり、自動的に重複排除
-- 読み出し時に ID を再計算し、破損や種別違いを検出
-- 120 frame ごとに完全 checkpoint を作成
-- 20 秒を越えた履歴と分岐前の未来は mark-and-sweep で回収
+- 読み出し時に ID を再計算し、破損を検出
+- 履歴は現在から 1 frame ずつ後方へ適用する delta のみを保持
+- 20 秒を越えた履歴と分岐前の未来は、破棄が 120 frame 分たまった時点で mark-and-sweep により回収
 - HUD の `CAS / DELTA SAVE` で blob 数、payload 量、完全 copy 比の削減率をリアルタイム表示
 
 汎用実装は `src/timeline.rs` の `Timeline` と `SnapshotState` に分離され、ゲーム固有型へ依存しません。
@@ -107,10 +107,14 @@ FrameDelta { content_id }
 
 | ファイル | 役割 |
 | --- | --- |
+| `src/audio.rs` | macroquad への音声ロード・再生・ミュート制御 |
+| `src/editor.rs` | ボーナスエディタの状態、入力反映、validator 呼び出し |
+| `src/game.rs` | `Game`、ステージ遷移、巻き戻し orchestration |
+| `src/render.rs` | camera、vector 描画、HUD、エディタ表示、巻き戻し演出 |
 | `src/sound.rs` | UK garage ループと効果音の stereo WAV 生成（外部 asset なし） |
-| `src/timeline.rs` | BLAKE3 CAS、XOR 差分、checkpoint、GC、frame rewind |
+| `src/timeline.rs` | BLAKE3 CAS、XOR 差分、GC、frame rewind |
 | `src/world.rs` | platformer 物理、collision、4 ステージ定義、ボーナス端末・Rust パズル、snapshot codec、固定点 rule |
-| `src/main.rs` | macroquad loop、入力・コードエディタ、audio 再生、vector 描画、HUD、巻き戻し演出 |
+| `src/main.rs` | window 設定、macroquad loop、入力採取、各 module の配線 |
 
 ## 検証
 
@@ -135,7 +139,7 @@ cargo clippy --locked --all-targets -- -D warnings
 - GameState の byte 単位 round trip
 - 前進だけでは Stage 1 のゲートを通れないこと
 - 全 4 ステージの scripted rewind 解法が成立すること
-- ボーナス端末の Rust バリデータが正解・不正解を正しく判定すること
+- ボーナス端末の validator が想定解を受理し、壊れた回答、未編集 stub、コメント・文字列だけの偽装を拒否すること
 - 生成した UK garage ループが有効な stereo WAV であること
 
 視覚 smoke test 用に `UNRUN_CAPTURE_PATH` を設定すると、起動後の frame を PNG へ書き出して自動終了します。
@@ -150,4 +154,8 @@ UNRUN_CAPTURE_PATH=/tmp/unrun.png cargo run
 cargo run --locked -- --visual-test
 ```
 
-orientation test は左上=赤、右上=緑、左下=青、右下=黄の probe を GPU で描き、screen readback の pixel を直接照合します。validator 自体にも正常・上下反転・左右反転の unit test があります。GitHub Actions では macOS / Windows の通常 test に加え、Linux の仮想 display 上でこの GPU test を実行します。
+orientation test は左上=赤、右上=緑、左下=青、右下=黄の probe を GPU で描き、screen readback の pixel を直接照合します。validator 自体にも正常・上下反転・左右反転の unit test があります。GitHub Actions では Linux / macOS / Windows の各 runner で format・unit test・Clippy を実行し、Linux の仮想 display 上で GPU test も実行します。
+
+## ライセンス
+
+[MIT License](LICENSE)

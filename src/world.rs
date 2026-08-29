@@ -164,10 +164,10 @@ pub const BONUS_PUZZLES: [BonusPuzzle; 3] = [
     BonusPuzzle {
         title: "01 // OWNERSHIP",
         subtitle: "TIMELINE OWNERSHIP",
-        prompt: "This code moves the timeline and then tries to use it again. Fix it so both `past` and `timeline` can be printed.",
+        prompt: "This code moves the timeline and then tries to use it again. Keep `timeline` available after creating `past`.",
         starter: "fn main() {\n    let timeline = String::from(\"unrun\");\n    let past = timeline;\n    println!(\"{}\", timeline);\n}",
         hint: "hint: clone() or borrow with & / .clone()",
-        success: "Timeline cloned - both futures can now be read.",
+        success: "Timeline accepted - both futures can now be read.",
     },
     BonusPuzzle {
         title: "02 // MATCH",
@@ -175,7 +175,7 @@ pub const BONUS_PUZZLES: [BonusPuzzle; 3] = [
         prompt: "The gate should be Open when the Fixed Point was touched and the rewind amount is at least 75 frames. Complete the match.",
         starter: "enum Gate { Closed, Open }\nfn gate_state(fixed: bool, rewound: u32) -> Gate {\n    // TODO: return Open when fixed && rewound >= 75\n    Gate::Closed\n}",
         hint: "hint: if fixed && rewound >= 75 { Gate::Open } else { Gate::Closed }",
-        success: "Gate logic compiled - Fixed Point now remembered.",
+        success: "Gate logic accepted - Fixed Point now remembered.",
     },
     BonusPuzzle {
         title: "03 // ITERATOR",
@@ -188,31 +188,170 @@ pub const BONUS_PUZZLES: [BonusPuzzle; 3] = [
 ];
 
 pub fn validate_bonus_puzzle(index: usize, code: &str) -> bool {
-    let lower = code.to_lowercase();
-    match index {
-        0 => {
-            // Ownership: must keep original usable
-            (lower.contains("clone()")
-                || lower.contains("&timeline")
-                || lower.contains("& timeline"))
-                && lower.contains("past")
-                && lower.contains("timeline")
+    const OWNERSHIP_ANSWERS: &[&str] = &[
+        "fn main() {
+            let timeline = String::from(\"unrun\");
+            let past = timeline.clone();
+            println!(\"{}\", timeline);
+        }",
+        "fn main() {
+            let timeline = String::from(\"unrun\");
+            let past = &timeline;
+            println!(\"{}\", timeline);
+        }",
+    ];
+    const MATCH_ANSWERS: &[&str] = &[
+        "enum Gate { Closed, Open }
+        fn gate_state(fixed: bool, rewound: u32) -> Gate {
+            if fixed && rewound >= 75 { Gate::Open } else { Gate::Closed }
+        }",
+        "enum Gate { Closed, Open }
+        fn gate_state(fixed: bool, rewound: u32) -> Gate {
+            match (fixed, rewound) {
+                (true, 75..) => Gate::Open,
+                _ => Gate::Closed,
+            }
+        }",
+    ];
+    const ITERATOR_ANSWERS: &[&str] = &["fn sum_even(nums: &[i32]) -> i32 {
+        nums.iter().filter(|n| *n % 2 == 0).sum()
+    }"];
+
+    let Some(tokens) = tokenize_bonus_code(code) else {
+        return false;
+    };
+    let answers = match index {
+        0 => OWNERSHIP_ANSWERS,
+        1 => MATCH_ANSWERS,
+        2 => ITERATOR_ANSWERS,
+        _ => return false,
+    };
+    answers.iter().any(|answer| {
+        tokenize_bonus_code(answer).is_some_and(|answer_tokens| answer_tokens == tokens)
+    })
+}
+
+fn tokenize_bonus_code(code: &str) -> Option<Vec<String>> {
+    let bytes = code.as_bytes();
+    let mut tokens = Vec::new();
+    let mut delimiters = Vec::new();
+    let mut index = 0;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte.is_ascii_whitespace() {
+            index += 1;
+            continue;
         }
-        1 => {
-            lower.contains("fixed")
-                && lower.contains("rewound")
-                && lower.contains("75")
-                && lower.contains("open")
-                && (lower.contains("if") || lower.contains("match"))
+        if bytes[index..].starts_with(b"//") {
+            index += 2;
+            while index < bytes.len() && bytes[index] != b'\n' {
+                index += 1;
+            }
+            continue;
         }
-        2 => {
-            lower.contains("iter")
-                && lower.contains("filter")
-                && (lower.contains("% 2") || lower.contains("%2"))
-                && (lower.contains("sum") || lower.contains("fold"))
+        if bytes[index..].starts_with(b"/*") {
+            index += 2;
+            let mut depth = 1usize;
+            while index < bytes.len() && depth > 0 {
+                if bytes[index..].starts_with(b"/*") {
+                    depth += 1;
+                    index += 2;
+                } else if bytes[index..].starts_with(b"*/") {
+                    depth -= 1;
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+            }
+            if depth != 0 {
+                return None;
+            }
+            continue;
         }
-        _ => false,
+        if byte == b'"' || byte == b'\'' {
+            let quote = byte;
+            index += 1;
+            let mut closed = false;
+            while index < bytes.len() {
+                match bytes[index] {
+                    b'\\' => index = index.checked_add(2)?,
+                    current if current == quote => {
+                        index += 1;
+                        closed = true;
+                        break;
+                    }
+                    _ => index += 1,
+                }
+            }
+            if !closed || index > bytes.len() {
+                return None;
+            }
+            tokens.push("<literal>".to_owned());
+            continue;
+        }
+        if byte.is_ascii_alphabetic() || byte == b'_' {
+            let start = index;
+            index += 1;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+            {
+                index += 1;
+            }
+            tokens.push(code[start..index].to_owned());
+            continue;
+        }
+        if byte.is_ascii_digit() {
+            let start = index;
+            index += 1;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+            {
+                index += 1;
+            }
+            tokens.push(code[start..index].to_owned());
+            continue;
+        }
+
+        match byte {
+            b'(' | b'[' | b'{' => {
+                delimiters.push(byte);
+                tokens.push((byte as char).to_string());
+                index += 1;
+                continue;
+            }
+            b')' | b']' | b'}' => {
+                let expected = match byte {
+                    b')' => b'(',
+                    b']' => b'[',
+                    b'}' => b'{',
+                    _ => unreachable!(),
+                };
+                if delimiters.pop() != Some(expected) {
+                    return None;
+                }
+                tokens.push((byte as char).to_string());
+                index += 1;
+                continue;
+            }
+            _ => {}
+        }
+
+        let operator = ["::", "&&", ">=", "==", "->", "=>", "..", "||", "<=", "!="]
+            .into_iter()
+            .find(|operator| code[index..].starts_with(operator));
+        if let Some(operator) = operator {
+            tokens.push(operator.to_owned());
+            index += operator.len();
+            continue;
+        }
+
+        let character = code[index..].chars().next()?;
+        tokens.push(character.to_string());
+        index += character.len_utf8();
     }
+
+    delimiters.is_empty().then_some(tokens)
 }
 
 pub fn is_bonus_stage(index: usize) -> bool {
@@ -294,7 +433,7 @@ pub const STAGES: [Stage; 4] = [
     },
     Stage {
         name: "BONUS // RUST FORGE",
-        subtitle: "ANOMALY SOURCE / EDIT TO RECOMPILE",
+        subtitle: "ANOMALY SOURCE / EDIT AND CHECK",
         spawn: [82.0, 572.0],
         spawn_facing: 1.0,
         solids: &STAGE_BONUS_SOLIDS,
@@ -555,16 +694,21 @@ impl SnapshotState for GameState {
         }
 
         let mut values = [0.0; FLOAT_COUNT];
-        for (index, value) in values.iter_mut().enumerate() {
-            let offset = index * 4;
-            let bits = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        let mut cursor = 0;
+        for value in &mut values {
+            let bits = read_snapshot_u32(bytes, &mut cursor)?;
             *value = f32::from_bits(bits);
         }
         if values.iter().any(|value| !value.is_finite()) {
             return Err("snapshot contains a non-finite number".into());
         }
-        let bool_offset = FLOAT_COUNT * 4;
-        if bytes[bool_offset] > 1 || bytes[bool_offset + 1] > 1 {
+        let grounded = *bytes
+            .get(cursor)
+            .ok_or_else(|| "snapshot is missing grounded state".to_owned())?;
+        let completed = *bytes
+            .get(cursor + 1)
+            .ok_or_else(|| "snapshot is missing completed state".to_owned())?;
+        if grounded > 1 || completed > 1 {
             return Err("snapshot contains an invalid boolean".into());
         }
 
@@ -574,10 +718,24 @@ impl SnapshotState for GameState {
         self.player.animation_phase = values[5];
         self.player.coyote_timer = values[6];
         self.player.jump_buffer = values[7];
-        self.player.grounded = bytes[bool_offset] != 0;
-        self.completed = bytes[bool_offset + 1] != 0;
+        self.player.grounded = grounded != 0;
+        self.completed = completed != 0;
         Ok(())
     }
+}
+
+fn read_snapshot_u32(bytes: &[u8], cursor: &mut usize) -> Result<u32, String> {
+    let end = cursor
+        .checked_add(4)
+        .ok_or_else(|| "snapshot offset overflow".to_owned())?;
+    let encoded = bytes
+        .get(*cursor..end)
+        .ok_or_else(|| "snapshot contains a truncated number".to_owned())?;
+    let encoded: [u8; 4] = encoded
+        .try_into()
+        .map_err(|_| "snapshot number has the wrong width".to_owned())?;
+    *cursor = end;
+    Ok(u32::from_le_bytes(encoded))
 }
 
 fn collision_solids<'a>(
@@ -616,25 +774,121 @@ mod tests {
     use crate::timeline::Timeline;
 
     #[test]
-    fn bonus_puzzle_validators_accept_correct_and_reject_broken() {
+    fn ownership_validator_accepts_expected_answers() {
         assert!(validate_bonus_puzzle(
             0,
-            "let past = timeline.clone(); println!(\"{}\", timeline);"
+            "fn main() {
+                let timeline = String::from(\"unrun\");
+                let past = timeline.clone();
+                println!(\"{}\", timeline);
+            }"
+        ));
+        assert!(validate_bonus_puzzle(
+            0,
+            "fn main() {
+                let timeline = String::from(\"changed literal\");
+                let past = &timeline;
+                println!(\"timeline: {}\", timeline);
+            }"
+        ));
+    }
+
+    #[test]
+    fn ownership_validator_rejects_broken_answer() {
+        assert!(!validate_bonus_puzzle(
+            0,
+            "fn main() {
+                let timeline = String::from(\"unrun\");
+                let past = timeline;
+                println!(\"{}\", timeline);
+            }"
         ));
         assert!(!validate_bonus_puzzle(
             0,
-            "let past = timeline; println!(\"{}\", timeline);"
+            "fn main( { let past = timeline.clone(); }"
+        ));
+    }
+
+    #[test]
+    fn ownership_validator_rejects_keyword_false_positives() {
+        let fake = format!("{}\n// clone()", BONUS_PUZZLES[0].starter);
+        assert!(!validate_bonus_puzzle(0, &fake));
+        assert!(!validate_bonus_puzzle(0, "\"past timeline clone()\""));
+    }
+
+    #[test]
+    fn match_validator_accepts_expected_answers() {
+        assert!(validate_bonus_puzzle(
+            1,
+            "enum Gate { Closed, Open }
+            fn gate_state(fixed: bool, rewound: u32) -> Gate {
+                if fixed && rewound >= 75 { Gate::Open } else { Gate::Closed }
+            }"
         ));
         assert!(validate_bonus_puzzle(
             1,
-            "if fixed && rewound >= 75 { Gate::Open } else { Gate::Closed }"
+            "enum Gate { Closed, Open }
+            fn gate_state(fixed: bool, rewound: u32) -> Gate {
+                match (fixed, rewound) {
+                    (true, 75..) => Gate::Open,
+                    _ => Gate::Closed,
+                }
+            }"
         ));
-        assert!(!validate_bonus_puzzle(1, "Gate::Closed"));
+    }
+
+    #[test]
+    fn match_validator_rejects_broken_answer() {
+        assert!(!validate_bonus_puzzle(
+            1,
+            "enum Gate { Closed, Open }
+            fn gate_state(fixed: bool, rewound: u32) -> Gate {
+                if fixed && rewound >= 75 { Gate::Closed } else { Gate::Open }
+            }"
+        ));
+        assert!(!validate_bonus_puzzle(
+            1,
+            "if fixed && rewound >= 75 { Gate::Open"
+        ));
+    }
+
+    #[test]
+    fn match_validator_rejects_keyword_false_positives() {
+        let fake = format!("{}\n// if", BONUS_PUZZLES[1].starter);
+        assert!(!validate_bonus_puzzle(1, &fake));
+        assert!(!validate_bonus_puzzle(1, "\"fixed rewound 75 open match\""));
+    }
+
+    #[test]
+    fn iterator_validator_accepts_expected_answer() {
         assert!(validate_bonus_puzzle(
             2,
-            "nums.iter().filter(|n| *n % 2 == 0).sum()"
+            "fn sum_even(nums: &[i32]) -> i32 {
+                nums.iter().filter(|n| *n % 2 == 0).sum()
+            }"
         ));
-        assert!(!validate_bonus_puzzle(2, "0"));
+    }
+
+    #[test]
+    fn iterator_validator_rejects_broken_answer() {
+        assert!(!validate_bonus_puzzle(
+            2,
+            "fn sum_even(nums: &[i32]) -> i32 {
+                nums.iter().filter(|n| *n % 2 != 0).sum()
+            }"
+        ));
+        assert!(!validate_bonus_puzzle(
+            2,
+            "fn sum_even(nums: &[i32]) -> i32 {"
+        ));
+    }
+
+    #[test]
+    fn iterator_validator_rejects_keyword_false_positives() {
+        let fake = format!("{}\n// %2", BONUS_PUZZLES[2].starter);
+        assert!(!validate_bonus_puzzle(2, &fake));
+        assert!(!validate_bonus_puzzle(2, "\"iter filter % 2 sum\""));
+        assert!(!validate_bonus_puzzle(99, BONUS_PUZZLES[2].starter));
     }
 
     #[test]
@@ -648,6 +902,33 @@ mod tests {
         state = GameState::default();
         state.restore_snapshot(&bytes).unwrap();
         assert_eq!(state.encode_snapshot(), expected.encode_snapshot());
+    }
+
+    #[test]
+    fn snapshot_rejects_invalid_lengths_booleans_and_numbers() {
+        let original = GameState::default();
+        let valid = original.encode_snapshot();
+        assert_eq!(valid.len(), 34);
+
+        for invalid in [&valid[..33], &[0_u8; 35][..]] {
+            let mut state = original.clone();
+            assert!(state.restore_snapshot(invalid).is_err());
+            assert_eq!(state.encode_snapshot(), original.encode_snapshot());
+        }
+
+        let mut invalid_bool = valid.clone();
+        invalid_bool[32] = 2;
+        let mut state = original.clone();
+        assert!(state.restore_snapshot(&invalid_bool).is_err());
+        assert_eq!(state.encode_snapshot(), original.encode_snapshot());
+
+        for non_finite in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut invalid_number = valid.clone();
+            invalid_number[..4].copy_from_slice(&non_finite.to_bits().to_le_bytes());
+            let mut state = original.clone();
+            assert!(state.restore_snapshot(&invalid_number).is_err());
+            assert_eq!(state.encode_snapshot(), original.encode_snapshot());
+        }
     }
 
     #[test]
@@ -680,7 +961,7 @@ mod tests {
         let stage = stage(stage_index);
         let mut state = GameState::new(stage);
         let mut fixed = FixedPointState::default();
-        let mut timeline = Timeline::new(&state, HISTORY_FRAMES, 120).unwrap();
+        let mut timeline = Timeline::new(&state, HISTORY_FRAMES).unwrap();
 
         if is_bonus_stage(stage_index) {
             // Bonus: simulate solving the three code terminals, then normal rewind flow.

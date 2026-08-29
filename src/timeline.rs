@@ -18,63 +18,41 @@ pub trait SnapshotState {
 struct BlobId([u8; HASH_BYTES]);
 
 impl BlobId {
-    fn for_blob(kind: BlobKind, bytes: &[u8]) -> Self {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(&[kind as u8]);
-        hasher.update(bytes);
-        let hash = hasher.finalize();
+    fn for_blob(bytes: &[u8]) -> Self {
+        let hash = blake3::hash(bytes);
         let mut short = [0; HASH_BYTES];
         short.copy_from_slice(&hash.as_bytes()[..HASH_BYTES]);
         Self(short)
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-enum BlobKind {
-    Checkpoint = 1,
-    Delta = 2,
-}
-
-#[derive(Clone)]
-struct Blob {
-    kind: BlobKind,
-    bytes: Arc<[u8]>,
-}
-
 #[derive(Default)]
 struct ContentStore {
-    blobs: HashMap<BlobId, Blob>,
+    blobs: HashMap<BlobId, Arc<[u8]>>,
     deduplicated_writes: usize,
 }
 
 impl ContentStore {
-    fn insert(&mut self, kind: BlobKind, bytes: Vec<u8>) -> Result<BlobId, TimelineError> {
-        let id = BlobId::for_blob(kind, &bytes);
+    fn insert(&mut self, bytes: Vec<u8>) -> Result<BlobId, TimelineError> {
+        let id = BlobId::for_blob(&bytes);
         if let Some(existing) = self.blobs.get(&id) {
-            if existing.kind != kind || existing.bytes.as_ref() != bytes.as_slice() {
+            if existing.as_ref() != bytes.as_slice() {
                 return Err(TimelineError::HashCollision);
             }
             self.deduplicated_writes += 1;
             return Ok(id);
         }
 
-        self.blobs.insert(
-            id,
-            Blob {
-                kind,
-                bytes: Arc::from(bytes),
-            },
-        );
+        self.blobs.insert(id, Arc::from(bytes));
         Ok(id)
     }
 
-    fn get(&self, id: BlobId, expected: BlobKind) -> Result<Arc<[u8]>, TimelineError> {
+    fn get(&self, id: BlobId) -> Result<Arc<[u8]>, TimelineError> {
         let blob = self.blobs.get(&id).ok_or(TimelineError::MissingBlob)?;
-        if blob.kind != expected || BlobId::for_blob(blob.kind, &blob.bytes) != id {
+        if BlobId::for_blob(blob) != id {
             return Err(TimelineError::CorruptBlob);
         }
-        Ok(Arc::clone(&blob.bytes))
+        Ok(Arc::clone(blob))
     }
 
     fn retain(&mut self, live: &HashSet<BlobId>) {
@@ -82,14 +60,13 @@ impl ContentStore {
     }
 
     fn byte_len(&self) -> usize {
-        self.blobs.values().map(|blob| blob.bytes.len()).sum()
+        self.blobs.values().map(|blob| blob.len()).sum()
     }
 }
 
 #[derive(Clone, Debug)]
 struct FrameDelta {
     delta: BlobId,
-    checkpoint: Option<BlobId>,
     logical_bytes: usize,
 }
 
@@ -141,40 +118,28 @@ impl std::error::Error for TimelineError {}
 
 /// A bounded, frame-addressable rewind history.
 ///
-/// Full checkpoints and XOR deltas share one content-addressed store. Repeated
-/// idle frames therefore cost one shared empty delta instead of full copies.
+/// Deltas live in one content-addressed store. Repeated idle frames therefore
+/// cost one shared empty delta instead of full copies.
 pub struct Timeline {
     store: ContentStore,
     frames: VecDeque<FrameDelta>,
     current: Vec<u8>,
-    initial_checkpoint: Option<BlobId>,
     capacity: usize,
-    checkpoint_interval: usize,
-    frames_recorded: usize,
     discarded_since_gc: usize,
 }
 
 impl Timeline {
-    pub fn new<S: SnapshotState>(
-        state: &S,
-        capacity: usize,
-        checkpoint_interval: usize,
-    ) -> Result<Self, TimelineError> {
+    pub fn new<S: SnapshotState>(state: &S, capacity: usize) -> Result<Self, TimelineError> {
         let current = state.encode_snapshot();
         if current.len() > u16::MAX as usize {
             return Err(TimelineError::StateTooLarge);
         }
 
-        let mut store = ContentStore::default();
-        let initial_checkpoint = store.insert(BlobKind::Checkpoint, current.clone())?;
         Ok(Self {
-            store,
+            store: ContentStore::default(),
             frames: VecDeque::with_capacity(capacity.min(4096)),
             current,
-            initial_checkpoint: Some(initial_checkpoint),
             capacity,
-            checkpoint_interval: checkpoint_interval.max(1),
-            frames_recorded: 0,
             discarded_since_gc: 0,
         })
     }
@@ -184,26 +149,22 @@ impl Timeline {
         if next.len() > u16::MAX as usize {
             return Err(TimelineError::StateTooLarge);
         }
+        if self.capacity == 0 {
+            self.current = next;
+            return Ok(());
+        }
 
         let encoded_delta = encode_delta(&self.current, &next)?;
-        let delta = self.store.insert(BlobKind::Delta, encoded_delta)?;
-        self.frames_recorded += 1;
-        let checkpoint = if self.frames_recorded % self.checkpoint_interval == 0 {
-            Some(self.store.insert(BlobKind::Checkpoint, next.clone())?)
-        } else {
-            None
-        };
+        let delta = self.store.insert(encoded_delta)?;
 
         self.frames.push_back(FrameDelta {
             delta,
-            checkpoint,
             logical_bytes: next.len(),
         });
         self.current = next;
 
         if self.frames.len() > self.capacity {
             self.frames.pop_front();
-            self.initial_checkpoint = None;
             self.discarded_since_gc += 1;
         }
         self.collect_garbage_if_needed();
@@ -214,7 +175,7 @@ impl Timeline {
         let Some(frame) = self.frames.back().cloned() else {
             return Ok(false);
         };
-        let delta = self.store.get(frame.delta, BlobKind::Delta)?;
+        let delta = self.store.get(frame.delta)?;
         let previous = apply_delta_backwards(&self.current, &delta)?;
         state
             .restore_snapshot(&previous)
@@ -256,15 +217,9 @@ impl Timeline {
     }
 
     pub fn collect_garbage(&mut self) {
-        let mut live = HashSet::with_capacity(self.frames.len() * 2 + 1);
-        if let Some(initial) = self.initial_checkpoint {
-            live.insert(initial);
-        }
+        let mut live = HashSet::with_capacity(self.frames.len());
         for frame in &self.frames {
             live.insert(frame.delta);
-            if let Some(checkpoint) = frame.checkpoint {
-                live.insert(checkpoint);
-            }
         }
         self.store.retain(&live);
         self.discarded_since_gc = 0;
@@ -339,6 +294,15 @@ fn apply_xor_delta(current: &[u8], delta: &[u8]) -> Result<Vec<u8>, TimelineErro
     }
     let mask = &delta[2..2 + mask_len];
     let values = &delta[2 + mask_len..];
+    if state_len % 8 != 0 {
+        let valid_bits = state_len % 8;
+        let padding_mask = !((1_u8 << valid_bits) - 1);
+        if mask.last().is_some_and(|byte| byte & padding_mask != 0) {
+            return Err(TimelineError::InvalidDelta(
+                "change mask sets an out-of-range bit",
+            ));
+        }
+    }
     let expected_values = mask.iter().map(|byte| byte.count_ones() as usize).sum();
     if values.len() != expected_values {
         return Err(TimelineError::InvalidDelta(
@@ -354,26 +318,56 @@ fn apply_xor_delta(current: &[u8], delta: &[u8]) -> Result<Vec<u8>, TimelineErro
             value_index += 1;
         }
     }
+    if value_index != values.len() {
+        return Err(TimelineError::InvalidDelta(
+            "change payload was not fully consumed",
+        ));
+    }
     Ok(restored)
 }
 
 fn apply_replacement_delta(current: &[u8], delta: &[u8]) -> Result<Vec<u8>, TimelineError> {
-    if delta.len() < 8 {
-        return Err(TimelineError::InvalidDelta("truncated replacement header"));
-    }
-    let before_len = u32::from_le_bytes(delta[0..4].try_into().unwrap()) as usize;
-    let after_len = u32::from_le_bytes(delta[4..8].try_into().unwrap()) as usize;
-    if delta.len() != 8 + before_len + after_len {
+    let mut cursor = 0;
+    let before_len = usize::try_from(read_delta_u32(delta, &mut cursor)?)
+        .map_err(|_| TimelineError::InvalidDelta("replacement length is unsupported"))?;
+    let after_len = usize::try_from(read_delta_u32(delta, &mut cursor)?)
+        .map_err(|_| TimelineError::InvalidDelta("replacement length is unsupported"))?;
+    let expected_len = cursor
+        .checked_add(before_len)
+        .and_then(|length| length.checked_add(after_len))
+        .ok_or(TimelineError::InvalidDelta("replacement length overflow"))?;
+    if delta.len() != expected_len {
         return Err(TimelineError::InvalidDelta("replacement length mismatch"));
     }
-    let before = &delta[8..8 + before_len];
-    let after = &delta[8 + before_len..];
+    let before_end = cursor
+        .checked_add(before_len)
+        .ok_or(TimelineError::InvalidDelta("replacement length overflow"))?;
+    let before = delta
+        .get(cursor..before_end)
+        .ok_or(TimelineError::InvalidDelta("truncated replacement body"))?;
+    let after = delta
+        .get(before_end..expected_len)
+        .ok_or(TimelineError::InvalidDelta("truncated replacement body"))?;
     if current != after {
         return Err(TimelineError::InvalidDelta(
             "replacement applied to wrong state",
         ));
     }
     Ok(before.to_vec())
+}
+
+fn read_delta_u32(bytes: &[u8], cursor: &mut usize) -> Result<u32, TimelineError> {
+    let end = cursor
+        .checked_add(4)
+        .ok_or(TimelineError::InvalidDelta("replacement offset overflow"))?;
+    let encoded = bytes
+        .get(*cursor..end)
+        .ok_or(TimelineError::InvalidDelta("truncated replacement header"))?;
+    let encoded: [u8; 4] = encoded
+        .try_into()
+        .map_err(|_| TimelineError::InvalidDelta("replacement header field has the wrong width"))?;
+    *cursor = end;
+    Ok(u32::from_le_bytes(encoded))
 }
 
 #[cfg(test)]
@@ -401,10 +395,24 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct ByteState(Vec<u8>);
+
+    impl SnapshotState for ByteState {
+        fn encode_snapshot(&self) -> Vec<u8> {
+            self.0.clone()
+        }
+
+        fn restore_snapshot(&mut self, bytes: &[u8]) -> Result<(), String> {
+            self.0 = bytes.to_vec();
+            Ok(())
+        }
+    }
+
     #[test]
     fn rewinds_every_recorded_frame() {
         let mut state = TestState { left: 1, right: 2 };
-        let mut timeline = Timeline::new(&state, 60, 10).unwrap();
+        let mut timeline = Timeline::new(&state, 60).unwrap();
         for value in 2..=12 {
             state.left = value;
             timeline.record(&state).unwrap();
@@ -421,25 +429,54 @@ mod tests {
     #[test]
     fn repeated_idle_frames_share_one_delta_blob() {
         let state = TestState { left: 7, right: 9 };
-        let mut timeline = Timeline::new(&state, 600, 120).unwrap();
-        for _ in 0..100 {
+        let mut timeline = Timeline::new(&state, 600).unwrap();
+
+        let initial = timeline.stats();
+        assert_eq!(initial.blob_count, 0);
+        assert_eq!(initial.stored_payload_bytes, 0);
+
+        for _ in 0..120 {
             timeline.record(&state).unwrap();
         }
 
         let stats = timeline.stats();
-        assert_eq!(stats.rewindable_frames, 100);
-        assert!(
-            stats.blob_count <= 2,
-            "{} blobs were stored",
-            stats.blob_count
-        );
-        assert!(stats.deduplicated_writes >= 99);
+        assert_eq!(stats.rewindable_frames, 120);
+        assert_eq!(stats.blob_count, 1);
+        assert_eq!(stats.stored_payload_bytes, 4);
+        assert_eq!(stats.deduplicated_writes, 119);
+    }
+
+    #[test]
+    fn changed_frame_stores_only_its_delta() {
+        let mut state = TestState { left: 0, right: 0 };
+        let mut timeline = Timeline::new(&state, 10).unwrap();
+        state.left = 1;
+        timeline.record(&state).unwrap();
+
+        let stats = timeline.stats();
+        assert_eq!(stats.blob_count, 1);
+        assert_eq!(stats.stored_payload_bytes, 5);
+    }
+
+    #[test]
+    fn full_history_stores_only_referenced_deltas() {
+        let mut state = TestState { left: 0, right: 0 };
+        let mut timeline = Timeline::new(&state, 2).unwrap();
+        state.left = 1;
+        timeline.record(&state).unwrap();
+        state.left = 3;
+        timeline.record(&state).unwrap();
+
+        let stats = timeline.stats();
+        assert_eq!(stats.rewindable_frames, 2);
+        assert_eq!(stats.blob_count, 2);
+        assert_eq!(stats.stored_payload_bytes, 10);
     }
 
     #[test]
     fn history_capacity_is_a_hard_rewind_limit() {
         let mut state = TestState { left: 0, right: 0 };
-        let mut timeline = Timeline::new(&state, 3, 2).unwrap();
+        let mut timeline = Timeline::new(&state, 3).unwrap();
         for value in 1..=5 {
             state.left = value;
             timeline.record(&state).unwrap();
@@ -454,11 +491,168 @@ mod tests {
     }
 
     #[test]
+    fn zero_capacity_tracks_current_without_storing_history() {
+        let mut state = TestState { left: 0, right: 0 };
+        let mut timeline = Timeline::new(&state, 0).unwrap();
+        state.left = 1;
+        timeline.record(&state).unwrap();
+
+        assert_eq!(timeline.available_frames(), 0);
+        assert!(!timeline.can_rewind());
+        assert!(!timeline.rewind(&mut state).unwrap());
+        assert_eq!(state.left, 1);
+        assert_eq!(timeline.stats().blob_count, 0);
+        assert_eq!(timeline.stats().stored_payload_bytes, 0);
+    }
+
+    #[test]
+    fn recording_after_rewind_discards_the_old_future() {
+        let mut state = TestState { left: 0, right: 0 };
+        let mut timeline = Timeline::new(&state, 10).unwrap();
+        for value in [1, 2] {
+            state.left = value;
+            timeline.record(&state).unwrap();
+        }
+
+        assert!(timeline.rewind(&mut state).unwrap());
+        assert_eq!(state.left, 1);
+        state.left = 3;
+        timeline.record(&state).unwrap();
+        timeline.collect_garbage();
+
+        assert!(timeline.rewind(&mut state).unwrap());
+        assert_eq!(state.left, 1);
+        assert!(timeline.rewind(&mut state).unwrap());
+        assert_eq!(state.left, 0);
+        assert!(!timeline.rewind(&mut state).unwrap());
+    }
+
+    #[test]
+    fn every_remaining_frame_rewinds_after_automatic_gc() {
+        let mut state = TestState { left: 0, right: 0 };
+        let mut timeline = Timeline::new(&state, 180).unwrap();
+        for value in 1..=300 {
+            state.left = value;
+            timeline.record(&state).unwrap();
+        }
+
+        assert_eq!(timeline.available_frames(), 180);
+        for expected in (120..300).rev() {
+            assert!(timeline.rewind(&mut state).unwrap());
+            assert_eq!(state.left, expected);
+        }
+        assert!(!timeline.rewind(&mut state).unwrap());
+    }
+
+    #[test]
+    fn snapshot_size_limit_accepts_maximum_and_rejects_oversized() {
+        let mut state = ByteState(vec![0; u16::MAX as usize]);
+        let mut timeline = Timeline::new(&state, 1).unwrap();
+        state.0[u16::MAX as usize - 1] = 1;
+        timeline.record(&state).unwrap();
+        assert!(timeline.rewind(&mut state).unwrap());
+        assert_eq!(state.0.len(), u16::MAX as usize);
+        assert_eq!(state.0[u16::MAX as usize - 1], 0);
+
+        let oversized = ByteState(vec![0; u16::MAX as usize + 1]);
+        assert!(matches!(
+            Timeline::new(&oversized, 1),
+            Err(TimelineError::StateTooLarge)
+        ));
+        assert_eq!(
+            timeline.record(&oversized),
+            Err(TimelineError::StateTooLarge)
+        );
+        assert_eq!(timeline.available_frames(), 0);
+    }
+
+    #[test]
+    fn identical_deltas_deduplicate_without_conflating_different_deltas() {
+        let mut state = TestState { left: 0, right: 0 };
+        let mut timeline = Timeline::new(&state, 10).unwrap();
+        for value in [1, 0, 2] {
+            state.left = value;
+            timeline.record(&state).unwrap();
+        }
+
+        let stats = timeline.stats();
+        assert_eq!(stats.blob_count, 2);
+        assert_eq!(stats.deduplicated_writes, 1);
+        for expected in [0, 1, 0] {
+            assert!(timeline.rewind(&mut state).unwrap());
+            assert_eq!(state.left, expected);
+        }
+    }
+
+    #[test]
     fn variable_length_snapshots_have_a_safe_fallback() {
         let before = b"short";
         let after = b"a longer state";
         let delta = encode_delta(before, after).unwrap();
         assert_eq!(apply_delta_backwards(after, &delta).unwrap(), before);
         assert!(apply_delta_backwards(b"wrong state", &delta).is_err());
+    }
+
+    #[test]
+    fn rejects_empty_and_unknown_delta_modes() {
+        assert_eq!(
+            apply_delta_backwards(&[], &[]),
+            Err(TimelineError::InvalidDelta("empty blob"))
+        );
+        assert_eq!(
+            apply_delta_backwards(&[], &[9]),
+            Err(TimelineError::InvalidDelta("unknown encoding"))
+        );
+    }
+
+    #[test]
+    fn rejects_truncated_xor_headers_and_masks() {
+        assert!(matches!(
+            apply_delta_backwards(&[0], &[0]),
+            Err(TimelineError::InvalidDelta(_))
+        ));
+        assert!(matches!(
+            apply_delta_backwards(&[0; 9], &[0, 9, 0, 0]),
+            Err(TimelineError::InvalidDelta(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_xor_payload_count_mismatches() {
+        assert!(matches!(
+            apply_delta_backwards(&[0], &[0, 1, 0, 1]),
+            Err(TimelineError::InvalidDelta(_))
+        ));
+        assert!(matches!(
+            apply_delta_backwards(&[0], &[0, 1, 0, 0, 7]),
+            Err(TimelineError::InvalidDelta(_))
+        ));
+        assert!(matches!(
+            apply_delta_backwards(&[0], &[0, 1, 0, 0x80, 7]),
+            Err(TimelineError::InvalidDelta(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_truncated_replacement_headers_and_bodies() {
+        assert!(matches!(
+            apply_delta_backwards(&[], &[1, 0, 0, 0, 0]),
+            Err(TimelineError::InvalidDelta(_))
+        ));
+        assert!(matches!(
+            apply_delta_backwards(&[8], &[1, 1, 0, 0, 0, 1, 0, 0, 0, 7]),
+            Err(TimelineError::InvalidDelta(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_replacement_delta_applied_to_the_wrong_current_state() {
+        let delta = encode_delta(b"before", b"a longer after state").unwrap();
+        assert_eq!(
+            apply_delta_backwards(b"wrong current state", &delta),
+            Err(TimelineError::InvalidDelta(
+                "replacement applied to wrong state"
+            ))
+        );
     }
 }
