@@ -24,6 +24,7 @@ pub(crate) struct EditorState {
     text: String,
     status: String,
     status_is_error: bool,
+    accepted: bool,
 }
 
 impl EditorState {
@@ -33,6 +34,7 @@ impl EditorState {
         self.text = BONUS_PUZZLES[terminal].starter.to_owned();
         self.status = "Edit the Rust code - Ctrl+Enter or F5 to check, Esc to close.".to_owned();
         self.status_is_error = false;
+        self.accepted = false;
     }
 
     pub(crate) fn is_open(&self) -> bool {
@@ -61,9 +63,14 @@ impl EditorState {
             return EditorEvent::Closed;
         }
         if input.submit {
-            return EditorEvent::Submitted {
-                accepted: self.submit(),
-            };
+            if self.accepted {
+                return EditorEvent::None;
+            }
+            let accepted = self.submit();
+            if accepted {
+                self.accepted = true;
+            }
+            return EditorEvent::Submitted { accepted };
         }
         if input.tab {
             self.text.push_str("    ");
@@ -89,6 +96,11 @@ impl EditorState {
     fn close(&mut self) {
         self.open = false;
         self.status.clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_text_for_test(&mut self, text: &str) {
+        self.text = text.to_owned();
     }
 
     fn submit(&mut self) -> bool {
@@ -143,5 +155,40 @@ mod tests {
         assert!(editor.is_open());
         assert!(!editor.status_is_error());
         assert_eq!(editor.status(), BONUS_PUZZLES[0].success);
+    }
+
+    #[test]
+    fn submit_after_accept_is_ignored_until_reopened() {
+        let mut editor = EditorState::default();
+        editor.open(0);
+        editor.text = "fn main() {
+            let timeline = String::from(\"unrun\");
+            let past = timeline.clone();
+            println!(\"{}\", timeline);
+        }"
+        .to_owned();
+        let submit = EditorInput {
+            submit: true,
+            ..EditorInput::default()
+        };
+
+        assert_eq!(
+            editor.update(&submit),
+            EditorEvent::Submitted { accepted: true }
+        );
+
+        // 受理後の再 submit は無視され、成功イベントも状態も変わらない
+        assert_eq!(editor.update(&submit), EditorEvent::None);
+        assert!(editor.is_open());
+        assert!(!editor.status_is_error());
+        assert_eq!(editor.status(), BONUS_PUZZLES[0].success);
+
+        // 開き直せば再度 submit できる(失敗時の編集・再 submit 経路は維持)
+        editor.open(0);
+        assert_eq!(
+            editor.update(&submit),
+            EditorEvent::Submitted { accepted: false }
+        );
+        assert!(editor.status_is_error());
     }
 }
