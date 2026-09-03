@@ -284,6 +284,7 @@ impl Game {
 mod tests {
     use super::*;
     use crate::timeline::SnapshotState;
+    use crate::world::BONUS_STAGE_INDEX;
 
     #[test]
     fn reset_restores_the_same_stage_initial_state() {
@@ -367,5 +368,55 @@ mod tests {
         assert_eq!(game.timeline.available_frames(), 0);
         assert!(!game.rewind_active);
         assert_eq!(game.rewind_blocked_flash, 1.0);
+    }
+
+    #[test]
+    fn accepted_bonus_submission_fires_success_events_only_once() {
+        const ANSWERS: [&str; 3] = [
+            "fn main() {
+            let timeline = String::from(\"unrun\");
+            let past = timeline.clone();
+            println!(\"{}\", timeline);
+        }",
+            "enum Gate { Closed, Open }
+        fn gate_state(fixed: bool, rewound: u32) -> Gate {
+            if fixed && rewound >= 75 { Gate::Open } else { Gate::Closed }
+        }",
+            "fn sum_even(nums: &[i32]) -> i32 {
+        nums.iter().filter(|n| *n % 2 == 0).sum()
+    }",
+        ];
+        let submit = FrameInput {
+            editor: EditorInput {
+                submit: true,
+                ..EditorInput::default()
+            },
+            ..FrameInput::default()
+        };
+        let close = FrameInput {
+            editor: EditorInput {
+                close: true,
+                ..EditorInput::default()
+            },
+            ..FrameInput::default()
+        };
+
+        let mut game = Game::new(BONUS_STAGE_INDEX).unwrap();
+        for (terminal, answer) in ANSWERS.iter().enumerate() {
+            game.open_editor(terminal);
+            game.editor.set_text_for_test(answer);
+
+            let first = game.update(&submit, 0.0).unwrap();
+            assert!(first.fixed_point_activated);
+            assert_eq!(first.gate_latched, terminal == ANSWERS.len() - 1);
+
+            // エディタが開いたまま再 submit しても成功イベントは再発火しない
+            let again = game.update(&submit, 0.0).unwrap();
+            assert!(!again.fixed_point_activated);
+            assert!(!again.gate_latched);
+
+            game.update(&close, 0.0).unwrap();
+        }
+        assert!(game.bonus_solved.iter().all(|&solved| solved));
     }
 }
